@@ -163,7 +163,8 @@ class MemoryBuffer:
                     q_value : torch.Tensor = ValueNet(state_action_input, history_next).sum()
                     q_values.append(q_value)
 
-                max_q = torch.argmax(torch.tensor(q_values))
+               # max_q = torch.argmax(torch.tensor(q_values))
+                max_q = torch.max(torch.tensor(q_values))
                 target = reward + gamma * max_q
             else:
                 rewards.append(reward.item())

@@ -26,7 +26,7 @@ parser.add_argument(
     help="已经存在的一个神经网络参数模型, 用于持久化训练" 
 )
 parser.add_argument(
-    '--lr', default=1e-3, type=float,
+    '--lr', default=1e-4, type=float,
     help="learning rate of training model"
 )
 parser.add_argument(
