@@ -135,53 +135,98 @@ class MemoryBuffer:
     def clear(self):
         self.buffer.clear()
     
+    # def learn_from(self, gamma, optimizer, ValueNet, device):
+    #     # 从后到前更新
+    #     losses = []
+    #     rewards = []
+    #     iter_wrapper = tqdm(range(len(self.buffer))[::-1])
+    #     iter_wrapper.set_description_str("training")
+    #     for i in iter_wrapper:
+    #         frame = self.buffer[i]
+    #         obs            = frame[0]
+    #         history        = frame[1]
+    #         act            = frame[2]
+    #         reward         = frame[3]
+    #         obs_next       = frame[4]
+    #         actionListNext = frame[5]
+    #         history_next   = frame[6]
+    #         done           = frame[7]
+    #         reward = torch.FloatTensor([reward]).to(device)
+    #         if done == False:
+    #             rewards.append(reward.item())
+    #             # 计算max Q(S, *)
+    #             q_values = []
+    #             for action_card in actionListNext:
+    #                 action = encode_card(process_card_list(action_card))
+    #                 state_input = torch.cat((obs_next.flatten(), action.flatten()), dim=0).float().to(device)
+    #                 state_action_input = state_input.unsqueeze(0).float().to(device)
+    #                 q_value : torch.Tensor = ValueNet(state_action_input, history_next).sum()
+    #                 q_values.append(q_value)
+    #
+    #            # max_q = torch.argmax(torch.tensor(q_values))
+    #             max_q = torch.max(torch.tensor(q_values))
+    #             target = reward + gamma * max_q
+    #         else:
+    #             rewards.append(reward.item())
+    #             target = reward
+    #
+    #         # 计算Q(St, At)
+    #         action = encode_card(act)
+    #         state_input = torch.cat((obs.flatten(), action.flatten()), dim=0).float().to(device)
+    #         state_action_input = state_input.unsqueeze(0).float().to(device)
+    #
+    #         q_value = ValueNet(state_action_input, history).sum().to(device)
+    #
+    #         loss = torch.square(q_value - target)
+    #         optimizer.zero_grad()
+    #         loss.backward()
+    #         optimizer.step()
+    #         losses.append(loss.item())
+    #
+    #     self.clear()
+    #     return losses, rewards
     def learn_from(self, gamma, optimizer, ValueNet, device):
-        # 从后到前更新
         losses = []
         rewards = []
-        iter_wrapper = tqdm(range(len(self.buffer))[::-1])
-        iter_wrapper.set_description_str("training")
-        for i in iter_wrapper:
+        # 从 terminal 状态往前更新（reverse 遍历）
+        for i in range(len(self.buffer))[::-1]:
             frame = self.buffer[i]
-            obs            = frame[0]
-            history        = frame[1]
-            act            = frame[2]
-            reward         = frame[3]
-            obs_next       = frame[4]
-            actionListNext = frame[5]
-            history_next   = frame[6]
-            done           = frame[7]
-            reward = torch.FloatTensor([reward]).to(device)
-            if done == False:
-                rewards.append(reward.item())
-                # 计算max Q(S, *)
-                q_values = []
-                for action_card in actionListNext:
-                    action = encode_card(process_card_list(action_card))
-                    state_input = torch.cat((obs_next.flatten(), action.flatten()), dim=0).float().to(device)
-                    state_action_input = state_input.unsqueeze(0).float().to(device)
-                    q_value : torch.Tensor = ValueNet(state_action_input, history_next).sum()
-                    q_values.append(q_value)
+            obs, history, act, reward, obs_next, actionListNext, history_next, done = frame
 
-               # max_q = torch.argmax(torch.tensor(q_values))
-                max_q = torch.max(torch.tensor(q_values))
-                target = reward + gamma * max_q
+            reward = torch.FloatTensor([reward]).to(device)
+
+            # ---------- 目标 Q 值 ----------
+            if not done:
+                with torch.no_grad():
+                    q_vals = []
+                    for action_card in actionListNext:
+                        action_emb = encode_card(process_card_list(action_card))
+                        state_input = torch.cat((obs_next.flatten(), action_emb.flatten()), dim=0).float().to(device)
+                        state_action_input = state_input.unsqueeze(0).float().to(device)
+                        q = ValueNet(state_action_input, history_next).sum()
+                        q_vals.append(q.item())  # 取出标量值，避免保留计算图
+                    max_q = max(q_vals)  # Python 最大值
+                    target = reward + gamma * max_q
             else:
-                rewards.append(reward.item())
                 target = reward
 
-            # 计算Q(St, At)
-            action = encode_card(act)
-            state_input = torch.cat((obs.flatten(), action.flatten()), dim=0).float().to(device)
+            # ---------- 当前 Q 值 ----------
+            action_emb = encode_card(act)
+            state_input = torch.cat((obs.flatten(), action_emb.flatten()), dim=0).float().to(device)
             state_action_input = state_input.unsqueeze(0).float().to(device)
-
             q_value = ValueNet(state_action_input, history).sum().to(device)
 
             loss = torch.square(q_value - target)
             optimizer.zero_grad()
             loss.backward()
+
+            # ---------- 梯度裁剪 ----------
+            torch.nn.utils.clip_grad_norm_(ValueNet.parameters(), max_norm=1.0)
+
             optimizer.step()
+
             losses.append(loss.item())
+            rewards.append(reward.item())
 
         self.clear()
         return losses, rewards
