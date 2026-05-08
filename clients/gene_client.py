@@ -4,7 +4,7 @@
 支持模式：
     demo          基于规则的演示或自定义教练
     imitation     模仿学习（DAgger）
-    reinforcement 强化学习（DQN）
+    reinforcement 强化学习（DQN / DouZero-MC）
     test          加载模型进行测试
 """
 
@@ -142,7 +142,6 @@ class ImitationAction:
         self.log_file = os.path.join(check_path, "value.log")
 
     def write_log(self, message):
-        """追加一条记录到日志文件"""
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(message + "\n")
 
@@ -186,7 +185,6 @@ class ImitationAction:
 
         self.history_action.append(process_card_list(msg["actionList"][index]))
 
-        # 按间隔记录日志
         if self.count % self.args.log_interval == 0:
             self.write_log(f"[count={self.count}] expert_prob={self.use_expert_prob:.4f}, dataset_size={len(self.dataset)}")
 
@@ -231,7 +229,7 @@ class ImitationAction:
 
         save_path = os.path.join(self.check_path, f"imitation_{now_str()}_step{self.count}_prob{cur_val:.3f}.pth")
         torch.save({
-            "coach": self.args.client,
+            "coach": "imitation",
             "mode": "imitation",
             "model_state_dict": self.ValueNet.state_dict(),
             "model_class": ActionValueNet
@@ -249,8 +247,6 @@ class ReinforcementClient(BaseClient):
         self.check_path = check_path
         self.action = ReinforcementAction(args)
         self.episode = 0
-
-        # 日志文件
         self.log_file = os.path.join(check_path, "value.log")
 
     def write_log(self, message):
@@ -264,7 +260,7 @@ class ReinforcementClient(BaseClient):
         friendRank = order.index(friendPos)
         myRank, friendRank = sorted((myRank, friendRank))
         score = (myRank, friendRank)
-        reward_map = {(0,1):500, (0,2):350, (0,3):100, (1,2):-100, (1,3):-350, (2,3):-500}
+        reward_map = {(0,1):5, (0,2):3, (0,3):1, (1,2):-1, (1,3):-3, (2,3):-5}
         return reward_map.get(score, 0)
 
     def received_message(self, message):
@@ -272,34 +268,58 @@ class ReinforcementClient(BaseClient):
         self.state.parse(msg)
 
         if msg["stage"] == "beginning":
-            self.action.clear_temp()
+            self.action.reset_episode()
             self.episode += 1
 
-        elif msg["stage"] == "episodeOver":
-            reward = self.get_reward(msg["order"])
-            history = self.action.MapHistoryToLSTM().to(self.args.device)
-            self.action.update_post(reward=reward, obs_next=None, history_next=history, done=True, actionListNext=None)
-            self.action.send_buffer()
-            losses, rewards = self.action.replay_memory.learn_from(
-                gamma=self.args.gamma,
-                optimizer=self.action.optimizer,
-                ValueNet=self.action.ValueNet,
-                device=self.args.device
-            )
+        elif msg["stage"] in ("episodeOver", "gameOver"):
+            final_reward = self.get_reward(msg["order"])
+            self.action.apply_final_reward(final_reward)
 
-            # 记录日志
-            if self.episode % self.args.log_interval == 0:
-                self.write_log(f"[episode={self.episode}] avgloss = {np.mean(losses):.4f} reward = {sum(rewards)}")
+            # 训练
+            if len(self.action.replay_memory) >= self.args.batch_size:
+                all_losses = []
+                last_batch_reward = 0.0  # 用于展示最后一个 batch 的平均奖励
+                for _ in range(self.args.update_steps):
+                    batch = self.action.replay_memory.sample(self.args.batch_size)
+                    losses = self.action.replay_memory.learn_batch(
+                        batch,
+                        self.action.ValueNet,
+                        self.action.target_net,
+                        self.action.optimizer,
+                        self.args.gamma,
+                        self.args.device
+                    )
+                    all_losses.extend(losses)
+                    # 记录最后一个 batch 的平均奖励，方便日志展示
+                    batch_rewards = [t[3] for t in batch]
+                    last_batch_reward = sum(batch_rewards) / len(batch_rewards)
+
+                # 日志现在只在该写的时候写一次
+                if self.episode % self.args.log_interval == 0:
+                    avg_loss = sum(all_losses) / len(all_losses) if all_losses else 0.0
+                    self.write_log(
+                        f"[episode={self.episode}] avg_loss={avg_loss:.4f} "
+                        f"reward_sample={last_batch_reward:.1f}"
+                    )
+
+            # 衰减探索率
+            self.action.decay_epsilon()
 
             if self.episode % self.args.save_interval == 0:
-                save_path = os.path.join(self.check_path, f"rl_{now_str()}_ep{self.episode}_reward{sum(rewards):.3f}.pth")
+                save_path = os.path.join(
+                    self.check_path,
+                    f"rl_{now_str()}_ep{self.episode}.pth"
+                )
                 torch.save({
-                    "coach": self.args.client,
+                    "coach": "reinforcement",
                     "mode": "reinforcement",
                     "model_state_dict": self.action.ValueNet.state_dict(),
                     "model_class": ActionValueNet
                 }, save_path)
                 print(Back.GREEN + f"强化学习模型已保存: {save_path}" + Style.RESET_ALL)
+
+            if self.episode % self.args.target_update_freq == 0:
+                self.action.sync_target_network()
 
         if "actionList" in msg:
             act_idx = self.action.parse(msg, self.render)
@@ -312,80 +332,120 @@ class ReinforcementAction:
         self.action = []
         self.act_range = -1
         self.history_action = [['PASS', 'PASS', 'PASS']]
-        self.replay_memory = MemoryBuffer()
-        self.temp_store = {
-            "obs": None, "history": None, "act": None,
-            "reward": None, "obs_next": None, "actionListNext": None,
-            "history_next": None, "done": False
-        }
+        self.replay_memory = MemoryBuffer(capacity=args.replay_capacity)
 
+        # 本局暂存
+        self.episode_transitions = []
+        self.last_obs = None
+        self.last_history = None
+        self.last_act = None
+
+        # 加载或创建网络
         if args.model and args.model != "None":
             check_path(args.model)
-            self.state_dict = torch.load(args.model)
+            state_dict = torch.load(args.model)
         else:
-            self.state_dict = {}
-
-        model_class = self.state_dict.get("model_class", ActionValueNet)
+            state_dict = {}
+        model_class = state_dict.get("model_class", ActionValueNet)
         self.ValueNet = model_class().to(args.device)
-        if "model_state_dict" in self.state_dict:
-            self.ValueNet.load_state_dict(self.state_dict["model_state_dict"])
+        if "model_state_dict" in state_dict:
+            self.ValueNet.load_state_dict(state_dict["model_state_dict"])
+
+        # 目标网络（保留但在 MC 模式下不使用）
+        self.target_net = model_class().to(args.device)
+        self.target_net.load_state_dict(self.ValueNet.state_dict())
+        self.target_net.eval()
 
         self.optimizer = torch.optim.Adam(self.ValueNet.parameters(), lr=args.lr)
+        self.step_count = 0
 
     def MapHistoryToLSTM(self):
-        ret = torch.stack([encode_card(a).flatten() for a in self.history_action], dim=0).unsqueeze(0)
-        return ret
+        return torch.stack(
+            [encode_card(a).flatten() for a in self.history_action], dim=0
+        ).unsqueeze(0)
 
-    def clear_temp(self):
-        for k in self.temp_store:
-            self.temp_store[k] = None
-        self.temp_store["done"] = False
+    def reset_episode(self):
+        self.episode_transitions.clear()
+        self.last_obs = None
+        self.last_history = None
+        self.last_act = None
+        self.history_action = [['PASS', 'PASS', 'PASS']]
 
-    def update_pre(self, obs, history, act):
-        self.temp_store["obs"], self.temp_store["history"], self.temp_store["act"] = obs, history, act
+    def apply_final_reward(self, final_reward):
+        if not self.episode_transitions:
+            return
+        for i, trans in enumerate(self.episode_transitions):
+            t = list(trans)
+            t[3] = final_reward          # MC 目标
+            if i == len(self.episode_transitions) - 1:
+                t[7] = True
+            self.replay_memory.append(tuple(t))
 
-    def update_post(self, reward, obs_next, history_next, done, actionListNext):
-        self.temp_store["reward"] = reward
-        self.temp_store["obs_next"] = obs_next
-        self.temp_store["history_next"] = history_next
-        self.temp_store["done"] = done
-        self.temp_store["actionListNext"] = actionListNext
+    def sync_target_network(self):
+        self.target_net.load_state_dict(self.ValueNet.state_dict())
 
-    def send_buffer(self):
-        self.replay_memory.append((
-            self.temp_store["obs"],
-            self.temp_store["history"],
-            self.temp_store["act"],
-            self.temp_store["reward"],
-            self.temp_store["obs_next"],
-            self.temp_store["actionListNext"],
-            self.temp_store["history_next"],
-            self.temp_store["done"]
-        ))
+    def decay_epsilon(self):
+        """每局结束后衰减 epsilon"""
+        self.args.epsilon = max(0.1, self.args.epsilon * self.args.epsilon_decay)
 
     def parse(self, msg, render=True):
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
+
+        # 找到 PASS 的索引（PASS 动作列表第一个元素是 'PASS'）
+        pass_idx = None
+        for i, act in enumerate(self.action):
+            if act[0] == 'PASS':
+                pass_idx = i
+                break
+
+        # -------- 原有的 ε-贪婪 + Q 值计算 --------
         state = StateCatEmbedding(msg)
         history = self.MapHistoryToLSTM().float().to(self.args.device)
-        if random.random() > self.args.epsilon:
-            q_vals = []
+
+        # 无论是贪婪还是探索，我们都把 Q 值算出来，方便后续干预
+        q_vals = []
+        with torch.no_grad():
             for i in range(self.act_range + 1):
-                act_emb = ActionEmbedding(msg, i)
-                inp = torch.cat((state.flatten(), act_emb.flatten()), dim=0).unsqueeze(0).to(self.args.device)
+                act_emb = ActionEmbedding(msg, i).to(self.args.device)
+                inp = torch.cat((state.flatten().to(self.args.device), act_emb)).unsqueeze(0)
                 q = self.ValueNet(inp, history).sum().item()
                 q_vals.append(q)
-            index = np.argmax(q_vals).item()
-        else:
-            index = random.randint(0, self.act_range)
 
-        act = process_card_list(self.action[index])
-        self.update_post(reward=0, obs_next=state, history_next=history, done=False, actionListNext=self.action)
-        if self.temp_store["obs"] is not None and self.temp_store["history"] is not None:
-            self.send_buffer()
-        self.update_pre(obs=state, history=history, act=act)
-        self.history_action.append(process_card_list(msg["actionList"][index]))
-        return index
+        if random.random() > self.args.epsilon:
+            action_idx = int(np.argmax(q_vals))
+        else:
+            action_idx = random.randint(0, self.act_range)
+
+        # ---------- 强制干预：如果选了 PASS 且还有其它合法动作 ----------
+        if action_idx == pass_idx and self.act_range > 0:   # act_range>0 表示不是只有 PASS
+            if random.random() < 0.8:                        # 80% 概率换成出牌
+                # 所有非 PASS 动作的索引
+                non_pass_indices = [i for i in range(self.act_range + 1) if i != pass_idx]
+                # 从中选出 Q 值最大的动作（第二大）
+                action_idx = max(non_pass_indices, key=lambda i: q_vals[i])
+
+        # ---------- 后续原有逻辑不变 ----------
+        act = process_card_list(self.action[action_idx])
+
+        if self.last_obs is not None and self.last_history is not None:
+            transition = (
+                self.last_obs.cpu(),
+                self.last_history.cpu(),
+                self.last_act,
+                0.0,                     # 中间奖励仍为 0，无过程奖励
+                state.cpu(),
+                self.action,
+                history.cpu(),
+                False
+            )
+            self.episode_transitions.append(transition)
+
+        self.last_obs = state
+        self.last_history = history
+        self.last_act = act
+        self.history_action.append(process_card_list(msg["actionList"][action_idx]))
+        return action_idx
 
 
 # ===================== Test 模式 =====================
@@ -405,7 +465,7 @@ class TestClient(BaseClient):
         friendRank = order.index(friendPos)
         myRank, friendRank = sorted((myRank, friendRank))
         score = (myRank, friendRank)
-        reward_map = {(0,1):500, (0,2):350, (0,3):100, (1,2):-100, (1,3):-350, (2,3):-500}
+        reward_map = {(0,1):5, (0,2):3, (0,3):1, (1,2):-1, (1,3):-3, (2,3):-5}
         return reward_map.get(score, 0)
 
     def received_message(self, message):
@@ -489,16 +549,21 @@ def main():
     im_parser.add_argument("--log_interval", type=int, default=50, help="日志记录频率（步）")
 
     # ---------- reinforcement ----------
-    rl_parser = subparsers.add_parser("reinforcement", help="强化学习 (DQN)")
+    rl_parser = subparsers.add_parser("reinforcement", help="强化学习 (DQN / DouZero-MC)")
     rl_parser.add_argument("pos", type=int, help="座位号")
     rl_parser.add_argument("-r", "--render", default=False, action="store_true")
     rl_parser.add_argument("--model", default=None)
-    rl_parser.add_argument("--lr", type=float, default=1e-3)
+    rl_parser.add_argument("--lr", type=float, default=1e-5, help="学习率（MC建议更低）")
     rl_parser.add_argument("--device", default="cpu")
-    rl_parser.add_argument("--epsilon", type=float, default=0.1)
+    rl_parser.add_argument("--epsilon", type=float, default=1.0, help="初始探索率")
+    rl_parser.add_argument("--epsilon_decay", type=float, default=0.9999, help="每局 epsilon 衰减系数")
     rl_parser.add_argument("--gamma", type=float, default=0.98)
     rl_parser.add_argument("--save_interval", type=int, default=1000)
     rl_parser.add_argument("--log_interval", type=int, default=100, help="日志记录频率（局）")
+    rl_parser.add_argument("--replay_capacity", type=int, default=100000, help="经验回放池最大容量")
+    rl_parser.add_argument("--batch_size", type=int, default=128, help="训练时的批量大小")
+    rl_parser.add_argument("--target_update_freq", type=int, default=10, help="每多少局同步一次目标网络")
+    rl_parser.add_argument("--update_steps", type=int, default=100, help="每局训练多少个 batch")
 
     # ---------- test ----------
     test_parser = subparsers.add_parser("test", help="测试已训练模型")
@@ -516,7 +581,6 @@ def main():
         os.makedirs(check_path_dir, exist_ok=True)
         print(f"输出目录已创建: {check_path_dir}")
 
-        # 写入配置信息到 value.log
         log_path = os.path.join(check_path_dir, "value.log")
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"* LEARNING_RATE : {args.lr}\n")
@@ -532,9 +596,12 @@ def main():
                 f.write(f"* BATCH_SIZE : {args.batch_size}\n")
                 f.write(f"* MIN_DATASET_SIZE : {args.min_dataset_size}\n")
             else:
-                f.write(f"* MODE : Reinforcement Learning (DQN)\n")
+                f.write(f"* MODE : Reinforcement Learning (MC / DQN)\n")
                 f.write(f"* EPSILON : {args.epsilon}\n")
+                f.write(f"* EPSILON_DECAY : {args.epsilon_decay}\n")
                 f.write(f"* GAMMA : {args.gamma}\n")
+                f.write(f"* BATCH_SIZE : {args.batch_size}\n")
+                f.write(f"* UPDATE_STEPS : {args.update_steps}\n")
     else:
         check_path_dir = None
 

@@ -41,7 +41,7 @@ class GameLauncher:
                     "render": {"label": "渲染画面", "type": bool, "default": False},
                     "model": {"label": "模型路径", "type": str, "default": ""},
                     "lr": {"label": "学习率", "type": float, "default": 1e-4},
-                    "device": {"label": "设备", "type": str, "default": "cpu", "option": ["cpu", "cuda"]},
+                    "device": {"label": "设备", "type": str, "default": "cuda", "option": ["cpu", "cuda"]},
                     "dagger_epochs": {"label": "每轮训练 epoch", "type": int, "default": 3},
                     "dagger_interval": {"label": "训练间隔(局)", "type": int, "default": 5},
                     "expert_decay": {"label": "专家衰减系数", "type": float, "default": 0.995},
@@ -53,24 +53,28 @@ class GameLauncher:
                 }
             },
             "reinforcement": {
-                "name": "强化学习 (DQN)",
-                "params": {
-                    "render": {"label": "渲染画面", "type": bool, "default": False},
-                    "model": {"label": "模型路径", "type": str, "default": ""},
-                    "lr": {"label": "学习率", "type": float, "default": 1e-3},
-                    "device": {"label": "设备", "type": str, "default": "cpu", "option": ["cpu", "cuda"]},
-                    "epsilon": {"label": "Epsilon", "type": float, "default": 0.1},
-                    "gamma": {"label": "Gamma", "type": float, "default": 0.98},
-                    "save_interval": {"label": "保存间隔(局)", "type": int, "default": 25},
-                    "log_interval": {"label": "日志记录间隔(局)", "type": int, "default": 50}
-                }
-            },
+    "name": "强化学习 (DQN)",
+    "params": {
+        "render": {"label": "渲染画面", "type": bool, "default": False},
+        "model": {"label": "模型路径", "type": str, "default": ""},
+        "lr": {"label": "学习率", "type": float, "default": 1e-4},
+        "device": {"label": "设备", "type": str, "default": "cuda", "option": ["cpu", "cuda"]},
+        "epsilon": {"label": "Epsilon", "type": float, "default": 1},
+        "gamma": {"label": "Gamma", "type": float, "default": 0.98},
+        "save_interval": {"label": "保存间隔(局)", "type": int, "default": 25},
+        "log_interval": {"label": "日志记录间隔(局)", "type": int, "default": 25},
+        "replay_capacity": {"label": "经验回放池容量", "type": int, "default": 20000},
+         "batch_size": {"label": "训练批量大小", "type": int, "default": 32768},
+         "target_update_freq": {"label": "目标网络更新频率(局)", "type": int, "default": 5},
+         "update_steps": {"label": "每局训练批次数", "type": int, "default": 10}
+    }
+},
             "test": {
                 "name": "测试模型",
                 "params": {
                     "render": {"label": "渲染画面", "type": bool, "default": True},
                     "model": {"label": "模型路径 (必填)", "type": str, "default": ""},
-                    "device": {"label": "设备", "type": str, "default": "cpu", "option": ["cpu", "cuda"]},
+                    "device": {"label": "设备", "type": str, "default": "cuda", "option": ["cpu", "cuda"]},
                     "epsilon": {"label": "Epsilon", "type": float, "default": 0.1}
                 }
             }
