@@ -4,6 +4,7 @@
 模式：
     rule           - 基于规则 / 自定义教练
     reinforcement  - 强化学习推理（被动接收 Learner 广播的权重，主动发送经验）
+                     启动后向 Learner 发送就绪消息，以便 Learner 累计连接数
 """
 
 import sys
@@ -19,11 +20,11 @@ import zmq
 import numpy as np
 import torch
 from ws4py.client.threadedclient import WebSocketClient
-from colorama import Back, Style
-from clients.state import State
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 注意导入路径：根据你的项目结构，可能需调整
+sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
+from state import State
 from util import *
 from model import ActionValueNet
 
@@ -63,19 +64,19 @@ class InferenceClient(BaseClient):
         self.args = args
         self.device = args.device
 
-        # 定义模型（与 gene_client 不同：这里只用于推理，由 Learner 更新权重）
+        # 定义模型（由 Learner 更新权重）
         self.model = ActionValueNet().to(self.device)
         self.model.eval()
 
         self.history_action = [['PASS', 'PASS', 'PASS']]
         self.episode = 0
 
-        # 经验收集相关（完全复刻 gene_client.py 的 ReinforcementAction）
-        self.episode_transitions = []   # 当前局的过渡存储
+        # 经验收集相关
+        self.episode_transitions = []
         self.last_obs = None
         self.last_history = None
         self.last_act = None
-        self.last_action_list = None    # 保存当前步的动作列表（用于 next_step 的 actionList）
+        self.last_action_list = None
 
         # ZMQ SUB：被动接收 Learner 广播的权重
         self.zmq_ctx = zmq.Context()
@@ -83,9 +84,15 @@ class InferenceClient(BaseClient):
         self.sub_socket.connect(f"tcp://{args.learner_host}:{args.learner_port}")
         self.sub_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
-        # ZMQ PUSH：向 Learner 发送经验
+        # ZMQ PUSH：向 Learner 发送经验（5555）
         self.push_socket = self.zmq_ctx.socket(zmq.PUSH)
-        self.push_socket.connect(f"tcp://{args.learner_host}:5555")   # Learner 的 PULL 端口
+        self.push_socket.connect(f"tcp://{args.learner_host}:5555")
+
+        # ZMQ PUSH：向 Learner 发送就绪消息（5556）
+        self.ready_socket = self.zmq_ctx.socket(zmq.PUSH)
+        self.ready_socket.connect(f"tcp://{args.learner_host}:5556")
+        self.ready_socket.send(b"ready")          # 启动时发送一次
+        print("已发送就绪信号至 Learner")
 
         # 后台监听权重
         self.weights_lock = threading.Lock()
@@ -94,12 +101,13 @@ class InferenceClient(BaseClient):
         self.listener_thread.start()
 
     def _weights_listener(self):
+        print("权重监听线程已启动")
         while not self.stop_listener:
             try:
                 if self.sub_socket.poll(timeout=500):
                     msg = self.sub_socket.recv()
                     state_dict = pickle.loads(msg)
-                    with self.weights_lock:  # 请求锁，保证与推理互斥
+                    with self.weights_lock:
                         for k, v in state_dict.items():
                             state_dict[k] = v.to(self.device)
                         self.model.load_state_dict(state_dict)
@@ -108,7 +116,6 @@ class InferenceClient(BaseClient):
                 print(f"权重监听异常: {e}")
 
     def get_reward(self, order):
-        """根据排名计算奖励（和 gene_client 一致）"""
         myPos = self.state._myPos
         friendPos = (myPos + 2) % 4
         myRank = order.index(myPos)
@@ -122,7 +129,6 @@ class InferenceClient(BaseClient):
         self.state.parse(msg)
 
         if msg["stage"] == "beginning":
-            # 重置本局经验
             self.episode_transitions.clear()
             self.last_obs = None
             self.last_history = None
@@ -131,14 +137,11 @@ class InferenceClient(BaseClient):
             self.history_action = [['PASS', 'PASS', 'PASS']]
             self.episode += 1
 
-        elif msg["stage"] in ("episodeOver", "gameOver"):
+        elif msg["stage"] == "episodeOver":
             final_reward = self.get_reward(msg["order"])
-            # 把最终奖励写入本局所有过渡
             self.apply_final_reward(final_reward)
-            # 发送整局轨迹给 Learner
             if self.episode_transitions:
                 self.send_experience()
-            # 清空临时存储
             self.episode_transitions.clear()
             self.last_obs = None
             self.last_history = None
@@ -149,83 +152,73 @@ class InferenceClient(BaseClient):
             self.send(json.dumps({"actIndex": act_idx}))
 
     def select_action(self, msg):
-        """与 gene_client.ReinforcementAction.parse 完全对齐的动作选择 + 经验记录"""
         action_list = msg["actionList"]
         act_range = msg["indexRange"]
 
-        # 找到 PASS 的索引（PASS 动作列表第一个元素是 'PASS'）
+        # 查找 PASS 索引
         pass_idx = None
         for i, act in enumerate(action_list):
             if act[0] == 'PASS':
                 pass_idx = i
                 break
 
-        # Q 值计算（使用 self.model，不是 self.ValueNet）
         state = StateCatEmbedding(msg).to(self.device)
         history = self.MapHistoryToLSTM().float().to(self.device)
 
-        # ---------- 加锁：防止推理时权重被后台更新 ----------
         with self.weights_lock:
             q_vals = []
             with torch.no_grad():
-                for i in range(self.act_range + 1):
+                for i in range(act_range + 1):
                     act_emb = ActionEmbedding(msg, i).to(self.device)
                     inp = torch.cat((state.flatten(), act_emb)).unsqueeze(0)
                     q = self.model(inp, history).sum().item()
                     q_vals.append(q)
-        # ---------- 锁释放 ----------
 
-        # ε-贪婪选择
         if random.random() > self.args.epsilon:
             action_idx = int(np.argmax(q_vals))
         else:
             action_idx = random.randint(0, act_range)
 
-        # 强制干预：如果选了 PASS 且还有其它合法动作（防止无限跳过）
         if action_idx == pass_idx and act_range > 0:
             if random.random() < 0.8:
                 non_pass_indices = [i for i in range(act_range + 1) if i != pass_idx]
                 action_idx = max(non_pass_indices, key=lambda i: q_vals[i])
 
-        # 动作后处理（转成标准格式）
         act = process_card_list(action_list[action_idx])
 
-        # ---------- 经验记录 ----------
+        # 记录经验
         if self.last_obs is not None and self.last_history is not None:
             transition = (
                 self.last_obs.cpu(),
                 self.last_history.cpu(),
                 self.last_act,
-                0.0,                 # 中间奖励暂为0，终局时覆盖
-                state.cpu(),         # next_obs
-                self.last_action_list,  # 上一步的 actionList
-                history.cpu(),       # next_history
-                False                # 非终止
+                0.0,
+                state.cpu(),
+                self.last_action_list,
+                history.cpu(),
+                False
             )
             self.episode_transitions.append(transition)
 
-        # 更新本次信息作为下一次的 last_*
         self.last_obs = state
         self.last_history = history
         self.last_act = act
-        self.last_action_list = action_list   # 保存原始动作列表
+        self.last_action_list = action_list
         self.history_action.append(act)
 
         return action_idx
 
     def apply_final_reward(self, final_reward):
-        """将最终奖励赋值给本局所有过渡，并标记最后一个 done"""
         if not self.episode_transitions:
             return
         for i, trans in enumerate(self.episode_transitions):
             t = list(trans)
-            t[3] = final_reward          # 用终局奖励替换
+            t[3] = final_reward
             if i == len(self.episode_transitions) - 1:
                 t[7] = True
             self.episode_transitions[i] = tuple(t)
 
     def send_experience(self):
-        """将本局轨迹序列化并通过 PUSH 发送到 Learner"""
         data = []
         for t in self.episode_transitions:
             obs_np = t[0].numpy() if torch.is_tensor(t[0]) else t[0]
@@ -253,6 +246,7 @@ class InferenceClient(BaseClient):
             self.listener_thread.join(timeout=2)
         self.sub_socket.close()
         self.push_socket.close()
+        self.ready_socket.close()
         self.zmq_ctx.term()
         super().close()
 
@@ -279,7 +273,7 @@ def main():
     rl_parser.add_argument("--device", default="cuda", help="推理设备")
     rl_parser.add_argument("--epsilon", type=float, default=0.1, help="探索率")
     rl_parser.add_argument("--learner_host", default="127.0.0.1", help="Learner IP")
-    rl_parser.add_argument("--learner_port", type=int, default=10000, help="Learner PUB 端口（用于接收权重）")
+    rl_parser.add_argument("--learner_port", type=int, default=10002, help="Learner PUB 端口（用于接收权重）")
 
     args = parser.parse_args()
 

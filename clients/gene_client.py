@@ -271,7 +271,7 @@ class ReinforcementClient(BaseClient):
             self.action.reset_episode()
             self.episode += 1
 
-        elif msg["stage"] in ("episodeOver", "gameOver"):
+        elif msg["stage"] == "episodeOver":
             final_reward = self.get_reward(msg["order"])
             self.action.apply_final_reward(final_reward)
 

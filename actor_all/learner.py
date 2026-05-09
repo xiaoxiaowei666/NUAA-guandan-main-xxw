@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Learner GUI 分发客户端 — PUB-SUB 模式
-绑定 4 个 PUB 端口 (10000-10003) 广播最新权重
+Learner GUI 分发客户端 — 单端口 PUB-SUB + 就绪计数
+绑定 1 个 PUB 端口 (默认 10002) 广播最新权重
 绑定 1 个 PULL 端口 (5555) 接收经验
+绑定 1 个 PULL 端口 (5556) 接收客户端就绪消息
+等待 4 个 reinforcement 客户端都就绪后，广播初始权重
+训练在独立线程中进行，避免阻塞接收
 """
 
 import os
@@ -37,20 +40,33 @@ class LearnerGUI:
         self.lr = tk.DoubleVar(value=1e-4)
         self.replay_capacity = tk.IntVar(value=200000)
         self.batch_size = tk.IntVar(value=512)
-        self.save_interval = tk.IntVar(value=1000)
-        self.log_interval = tk.IntVar(value=100)
+        self.save_interval = tk.IntVar(value=50)       # 每50次训练保存
+        self.log_interval = tk.IntVar(value=1)         # 每次训练都打印
+        self.pub_port = tk.IntVar(value=10002)
+        self.expected_clients = tk.IntVar(value=4)
 
         # 后端变量
         self.context = None
         self.pull_socket = None
-        self.pub_sockets = []      # 四个 PUB
+        self.pub_socket = None
+        self.ready_pull_socket = None
         self.running = False
 
         self.model = None
         self.optimizer = None
         self.replay_buffer = deque(maxlen=self.replay_capacity.get())
+        self.buffer_lock = threading.Lock()
         self.step_count = 0
         self.save_dir = ""
+
+        self.ready_count = 0
+        self.ready_lock = threading.Lock()
+
+        # 线程安全变量（启动时赋值）
+        self.batch_size_val = None
+        self.log_interval_val = None
+        self.save_interval_val = None
+        self.device_val = None
 
         self.build_ui()
 
@@ -84,11 +100,18 @@ class LearnerGUI:
         ttk.Entry(param_frame, textvariable=self.batch_size, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
         row += 1
 
-        ttk.Label(param_frame, text="保存间隔(步):").grid(row=row, column=0, sticky=tk.W)
+        ttk.Label(param_frame, text="保存间隔(训):").grid(row=row, column=0, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.save_interval, width=10).grid(row=row, column=1, padx=5, sticky=tk.W)
 
-        ttk.Label(param_frame, text="日志间隔(步):").grid(row=row, column=2, sticky=tk.W)
+        ttk.Label(param_frame, text="日志间隔(训):").grid(row=row, column=2, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.log_interval, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
+        row += 1
+
+        ttk.Label(param_frame, text="PUB 端口:").grid(row=row, column=0, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.pub_port, width=10).grid(row=row, column=1, padx=5, sticky=tk.W)
+
+        ttk.Label(param_frame, text="期望客户端数:").grid(row=row, column=2, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.expected_clients, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
 
         # 控制按钮
         btn_frame = ttk.Frame(self.master)
@@ -98,15 +121,18 @@ class LearnerGUI:
         self.stop_btn = ttk.Button(btn_frame, text="停止", command=self.stop_learner, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
-        # 状态
+        # 状态显示
         status_frame = ttk.LabelFrame(self.master, text="端口状态", padding=5)
         status_frame.pack(fill=tk.X, padx=10, pady=5)
         self.status_vars = []
-        ports_desc = ["PULL 5555"] + [f"PUB {p}" for p in [10000,10001,10002,10003]]
+        ports_desc = ["PULL 经验 5555", "PULL 就绪 5556", "PUB 权重"]
         for desc in ports_desc:
             var = tk.StringVar(value=f"{desc}: 未启动")
             ttk.Label(status_frame, textvariable=var, foreground="red").pack(side=tk.LEFT, padx=8)
             self.status_vars.append(var)
+
+        self.ready_label = ttk.Label(status_frame, text="就绪: 0", foreground="blue")
+        self.ready_label.pack(side=tk.LEFT, padx=20)
 
         # 日志
         log_frame = ttk.LabelFrame(self.master, text="运行日志", padding=5)
@@ -149,9 +175,17 @@ class LearnerGUI:
             save_interval = self.save_interval.get()
             log_interval = self.log_interval.get()
             device = self.device.get()
+            pub_port = self.pub_port.get()
+            expected = self.expected_clients.get()
         except tk.TclError:
             messagebox.showerror("错误", "参数格式不正确")
             return
+
+        # 保存到普通变量，供子线程安全使用
+        self.batch_size_val = batch_size
+        self.log_interval_val = log_interval
+        self.save_interval_val = save_interval
+        self.device_val = device
 
         # 加载模型
         if self.use_none.get():
@@ -181,46 +215,55 @@ class LearnerGUI:
 
         # ZMQ 初始化
         self.context = zmq.Context()
-        # PULL
+
         try:
             self.pull_socket = self.context.socket(zmq.PULL)
             self.pull_socket.bind("tcp://*:5555")
-            self.status_vars[0].set("PULL 5555: 已绑定")
-            self.log("PULL 5555 已绑定")
+            self.status_vars[0].set("PULL 经验 5555: 已绑定")
+            self.log("📥 PULL 经验 5555 已绑定")
         except Exception as e:
-            self.log(f"❌ PULL 绑定失败: {e}")
-            self.status_vars[0].set("PULL 5555: 失败")
+            self.log(f"❌ PULL 经验 绑定失败: {e}")
+            return
 
-        # 四个 PUB 端口
-        self.pub_sockets = []
-        ports = [10000, 10001, 10002, 10003]
-        for i, port in enumerate(ports):
-            try:
-                pub = self.context.socket(zmq.PUB)
-                pub.bind(f"tcp://*:{port}")
-                self.pub_sockets.append(pub)
-                self.status_vars[i+1].set(f"PUB {port}: 已绑定")
-                self.log(f"PUB {port} 已绑定")
-            except Exception as e:
-                self.log(f"❌ PUB {port} 绑定失败: {e}")
-                self.status_vars[i+1].set(f"PUB {port}: 失败")
+        try:
+            self.ready_pull_socket = self.context.socket(zmq.PULL)
+            self.ready_pull_socket.bind("tcp://*:5556")
+            self.status_vars[1].set("PULL 就绪 5556: 已绑定")
+            self.log("🔗 PULL 就绪 5556 已绑定")
+        except Exception as e:
+            self.log(f"❌ PULL 就绪 绑定失败: {e}")
+            return
 
-        # 启动后立刻广播一次初始权重
-        self.broadcast_weights()
+        try:
+            self.pub_socket = self.context.socket(zmq.PUB)
+            self.pub_socket.bind(f"tcp://*:{pub_port}")
+            self.status_vars[2].set(f"PUB {pub_port}: 已绑定")
+            self.log(f"📡 PUB {pub_port} 已绑定")
+        except Exception as e:
+            self.log(f"❌ PUB {pub_port} 绑定失败: {e}")
+            return
+
+        self.ready_count = 0
+        self.expected = expected
+        self.update_ready_display()
 
         self.running = True
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
 
-        threading.Thread(target=self._main_loop, daemon=True).start()
-        self.log("🚀 Learner 已启动")
+        threading.Thread(target=self._ready_receiver, daemon=True).start()
+        threading.Thread(target=self._receive_loop, daemon=True).start()
+        threading.Thread(target=self._train_loop, daemon=True).start()
+        self.log("🚀 Learner 已启动（等待客户端就绪）")
 
     def stop_learner(self):
         self.running = False
         if self.pull_socket:
             self.pull_socket.close()
-        for pub in self.pub_sockets:
-            pub.close()
+        if self.ready_pull_socket:
+            self.ready_pull_socket.close()
+        if self.pub_socket:
+            self.pub_socket.close()
         if self.context:
             self.context.term()
         for var in self.status_vars:
@@ -229,11 +272,35 @@ class LearnerGUI:
         self.stop_btn.config(state=tk.DISABLED)
         self.log("🛑 Learner 已停止")
 
+    def _ready_receiver(self):
+        while self.running:
+            try:
+                msg = self.ready_pull_socket.recv()
+                if msg == b"ready":
+                    with self.ready_lock:
+                        self.ready_count += 1
+                        count = self.ready_count
+                    self.update_ready_display()
+                    self.log(f"🔌 客户端就绪 ({count}/{self.expected})")
+                    if count == self.expected:
+                        self.log("✅ 全部客户端已就绪，广播初始权重")
+                        self.broadcast_weights()
+            except zmq.ZMQError:
+                break
+            except Exception as e:
+                self.log(f"就绪接收异常: {e}")
+
+    def update_ready_display(self):
+        def _update():
+            self.ready_label.config(text=f"就绪: {self.ready_count}/{self.expected}")
+        self.master.after(0, _update)
+
     def train_step(self, batch):
+        """执行一次训练步骤，返回平均损失"""
         self.model.train()
         total_loss = 0.0
         self.optimizer.zero_grad()
-        device = self.device.get()
+        device = self.device_val
 
         for obs, history, act, reward, _, _, _, _ in batch:
             obs = obs.to(device)
@@ -254,62 +321,70 @@ class LearnerGUI:
         return avg_loss.item()
 
     def broadcast_weights(self):
-        """将当前模型权重通过所有 PUB socket 广播"""
+        if not self.pub_socket:
+            return
         state_dict = {k: v.cpu() for k, v in self.model.state_dict().items()}
         msg = pickle.dumps(state_dict)
-        for pub in self.pub_sockets:
-            try:
-                pub.send(msg)
-            except Exception as e:
-                self.log(f"广播失败: {e}")
+        try:
+            self.pub_socket.send(msg)
+        except Exception as e:
+            self.log(f"广播失败: {e}")
 
-    def _main_loop(self):
+    def _receive_loop(self):
         poller = zmq.Poller()
         poller.register(self.pull_socket, zmq.POLLIN)
 
         while self.running:
-            socks = dict(poller.poll(timeout=500))  # 500ms
+            socks = dict(poller.poll(timeout=100))
             if self.pull_socket in socks:
                 try:
                     raw = self.pull_socket.recv(flags=zmq.NOBLOCK)
                     experiences = pickle.loads(raw)
-                    for trans in experiences:
-                        t = list(trans)
-                        t[0] = torch.from_numpy(t[0])      # obs
-                        t[1] = torch.from_numpy(t[1])      # history
-                        t[4] = torch.from_numpy(t[4])      # next_obs
-                        t[6] = torch.from_numpy(t[6])      # next_history
-                        self.replay_buffer.append(tuple(t))
-
-                    self.step_count += len(experiences)
+                    with self.buffer_lock:
+                        for trans in experiences:
+                            t = list(trans)
+                            t[0] = torch.from_numpy(t[0])
+                            t[1] = torch.from_numpy(t[1])
+                            t[4] = torch.from_numpy(t[4])
+                            t[6] = torch.from_numpy(t[6])
+                            self.replay_buffer.append(tuple(t))
+                        self.step_count += len(experiences)
                     self.log(f"📥 收到 {len(experiences)} 条经验 (池大小: {len(self.replay_buffer)})")
+                except Exception as e:
+                    self.log(f"❌ 接收异常: {e}")
 
-                    if len(self.replay_buffer) >= self.batch_size.get():
-                        batch = random.sample(self.replay_buffer, self.batch_size.get())
+    def _train_loop(self):
+        """训练线程：定期检查 buffer，满足条件则执行一次或多次训练并广播"""
+        self.log(f"🔍 训练线程启动，batch_size_val={self.batch_size_val}")
+        train_count = 0
+        while self.running:
+            time.sleep(1)
+            with self.buffer_lock:
+                buffer_len = len(self.replay_buffer)
+            if buffer_len >= self.batch_size_val:
+                try:
+                    for step in range(2):  # 连续多个batch
+                        with self.buffer_lock:
+                            if len(self.replay_buffer) < self.batch_size_val:
+                                break
+                            batch = random.sample(self.replay_buffer, self.batch_size_val)
                         loss = self.train_step(batch)
-                        if self.step_count % self.log_interval.get() == 0:
-                            self.log(f"🔄 Step {self.step_count} | Loss: {loss:.4f} | Buffer: {len(self.replay_buffer)}")
-
-                        # 训练后立即广播新权重
-                        self.broadcast_weights()
-
-                        if self.step_count % self.save_interval.get() == 0 and self.step_count > 0:
-                            save_path = os.path.join(self.save_dir, f"learner_step{self.step_count}.pth")
+                        train_count += 1
+                        if train_count % self.log_interval_val == 0:
+                            self.log(f"🔄 训练 #{train_count} | Loss: {loss:.4f} | Buffer: {buffer_len}")
+                        if train_count % 5 == 0:  # 每 10 次训练广播一次（可按需调整）
+                            self.broadcast_weights()
+                        if train_count % self.save_interval_val == 0:
+                            save_path = os.path.join(self.save_dir, f"learner_train{train_count}.pth")
                             torch.save({
                                 "model_state_dict": self.model.state_dict(),
                                 "model_class": ActionValueNet
                             }, save_path)
                             self.log(f"💾 模型已保存: {save_path}")
-
                 except Exception as e:
-                    self.log(f"❌ 经验处理异常: {e}")
-
-            # 即使没有经验，也可以定时广播（避免 Actor 错过更新）
-            # 此处简单实现：每 10 秒心跳广播一次
-            time.sleep(0.1)   # 避免忙等，外层 while + poll 已有 timeout
+                    self.log(f"❌ 训练异常: {e}")
 
 
-# 入口
 if __name__ == "__main__":
     root = tk.Tk()
     app = LearnerGUI(root)
