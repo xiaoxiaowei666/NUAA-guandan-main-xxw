@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-一键启动 4 桌掼蛋（每桌 1 RL + 3 EggPan 规则），所有客户端后台运行，不弹窗。
+一键启动 4 桌掼蛋（1 RL + 3 EggPan 规则），后台运行，监控进程状态。
 """
 import subprocess
 import sys
 import os
 import time
+import threading
+import signal
 
 # ===== 配置 =====
 PYTHON = r"D:\conda_envs\egg\python.exe"
 TCLI   = "clients/tcli.py"
 PROJECT_ROOT = r"C:\Users\24704\Desktop\毕设\NUAA-guandan-main"
 
-# 四张桌子的端口
 TABLES = [23456, 23457, 23458, 23459]
 
 def start(port, mode, seat, extra_args=[]):
@@ -22,7 +23,6 @@ def start(port, mode, seat, extra_args=[]):
         "--host", "127.0.0.1",
         "--port", str(port),
     ] + extra_args
-    # CREATE_NO_WINDOW 在 Windows 下隐藏窗口，非 Windows 系统可用 0
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     proc = subprocess.Popen(
         cmd,
@@ -35,48 +35,77 @@ def start(port, mode, seat, extra_args=[]):
     )
     return proc
 
+def monitor_processes(procs, labels):
+    """监控进程列表，直到所有进程退出或手动终止。"""
+    while True:
+        for i, (proc, label) in enumerate(zip(procs, labels)):
+            poll = proc.poll()
+            if poll is not None:
+                # 进程已退出
+                if poll == 0:
+                    print(f"[{label}] 正常退出 (returncode=0)")
+                elif poll < 0:
+                    print(f"[{label}] 被信号终止 (signal={-poll})")
+                else:
+                    print(f"[{label}] 异常退出 (returncode={poll})")
+                # 从监控列表中移除
+                procs.pop(i)
+                labels.pop(i)
+                break   # 因为改变了列表长度，重新开始循环
+        if not procs:
+            print("\n所有子进程已退出。")
+            break
+        time.sleep(1)
+
 def main():
     os.chdir(PROJECT_ROOT)
     print("=" * 60)
     print("正在启动 4 张桌子（每桌 1 强化学习 + 3 EggPan 规则）...")
     print("=" * 60)
 
-    # 1. 先启动所有强化学习客户端（座位1）
-    rl_procs = []
+    all_procs = []
+    all_labels = []
+
+    # 1. 强化学习客户端
     for port in TABLES:
-        print(f"启动 Table RL (端口 {port})...")
+        label = f"Table RL (port {port})"
         proc = start(port, "reinforcement", 1,
                      extra_args=["--learner_host", "127.0.0.1", "--learner_port", "10002"])
-        rl_procs.append(proc)
+        all_procs.append(proc)
+        all_labels.append(label)
+        print(f"启动 {label}")
 
-    print("\n所有 RL 客户端已启动，等待 5 秒后启动规则客户端...\n")
+    print("\n所有 RL 客户端已启动，等待 3 秒后启动规则客户端...\n")
     time.sleep(3)
 
-    # 2. 启动所有 EggPan 规则客户端（座位 2~4，无渲染）
-    rule_procs = []
+    # 2. EggPan 规则客户端
     for port in TABLES:
         for seat in (2, 3, 4):
-            print(f"启动 EggPan 规则 (端口 {port}, 座位 {seat})...")
-            proc = start(port, "rule", seat,
-                         extra_args=["-c", "EggPan"])  # 无 -r，不渲染
-            rule_procs.append(proc)
+            label = f"EggPan (port {port}, seat {seat})"
+            proc = start(port, "rule", seat, extra_args=["-c", "EggPan"])
+            all_procs.append(proc)
+            all_labels.append(label)
+            print(f"启动 {label}")
 
     print("\n" + "=" * 60)
-    print(f"全部客户端已启动！")
-    print(f"  强化学习: {len(rl_procs)} 个")
-    print(f"  EggPan 规则: {len(rule_procs)} 个")
-    print("所有进程在后台运行，关闭本窗口不会影响对局。")
-    print("如需终止，请在任务管理器中结束 python 进程。")
+    print(f"全部 {len(all_procs)} 个客户端已启动，开始监控...")
+    print("按 Ctrl+C 可终止所有客户端。")
     print("=" * 60)
 
-    # 可选：一直保持脚本运行，直到用户按 Ctrl+C
+    # 启动监控线程
+    monitor_thread = threading.Thread(target=monitor_processes, args=(all_procs, all_labels))
+    monitor_thread.daemon = True
+    monitor_thread.start()
+
+    # 主线程等待 Ctrl+C
     try:
-        while True:
-            time.sleep(1)
+        while monitor_thread.is_alive():
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("\n正在终止所有客户端...")
-        for p in rl_procs + rule_procs:
+        for p in all_procs:
             p.terminate()
+        time.sleep(2)   # 等待进程彻底结束
         print("已全部终止。")
 
 if __name__ == "__main__":
