@@ -194,7 +194,7 @@ class InferenceClient(BaseClient):
                 self.last_act,
                 0.0,
                 state.cpu(),
-                self.last_action_list,
+                action_list,            # A' = 当前步的动作列表（不是上一轮的）
                 history.cpu(),
                 False
             )
@@ -208,12 +208,15 @@ class InferenceClient(BaseClient):
 
         return action_idx
 
+    PASS_PENALTY = 0.05  # PASS 动作的微小惩罚
+
     def apply_final_reward(self, final_reward):
         if not self.episode_transitions:
             return
         for i, trans in enumerate(self.episode_transitions):
             t = list(trans)
-            t[3] = final_reward
+            # 基础终局奖励，PASS 动作额外减分
+            t[3] = final_reward - (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
             if i == len(self.episode_transitions) - 1:
                 t[7] = True
             self.episode_transitions[i] = tuple(t)
@@ -270,8 +273,8 @@ def main():
     rl_parser.add_argument("-r", "--render", action="store_true")
     rl_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
     rl_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
-    rl_parser.add_argument("--device", default="cuda", help="推理设备")
-    rl_parser.add_argument("--epsilon", type=float, default=0.1, help="探索率")
+    rl_parser.add_argument("--device", default="cpu", help="推理设备")
+    rl_parser.add_argument("--epsilon", type=float, default=0.4, help="探索率")
     rl_parser.add_argument("--learner_host", default="127.0.0.1", help="Learner IP")
     rl_parser.add_argument("--learner_port", type=int, default=10002, help="Learner PUB 端口（用于接收权重）")
 

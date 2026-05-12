@@ -128,22 +128,36 @@ class MemoryBuffer:
 
     def learn_batch(self, batch, ValueNet, target_net, optimizer, gamma, device):
         """
-        使用 DouZero 风格的纯 MC 目标：target = final_reward
-        target_net 参数保留，但这里不会用到。
+        TD(0) 训练：target = r + gamma * max_a' Q(s', a') * (1 - done)
+        target_net 参数保留以兼容调用方。
         """
         losses = []
         optimizer.zero_grad()
         total_loss = 0.0
 
         for obs, history, act, reward, obs_next, actionListNext, history_next, done in batch:
-            # MC 目标：直接用最终奖励（已经由 apply_final_reward 设置好）
-            target = torch.FloatTensor([reward]).to(device).squeeze()
-
             # 当前 Q 值
             act_emb = encode_card(act).flatten().to(device)
             state_curr = torch.cat((obs.flatten().to(device), act_emb)).unsqueeze(0)
-            q_curr = ValueNet(state_curr, history.to(device)).sum()
+            q_curr = ValueNet(state_curr, history.float().to(device)).sum()
 
+            # TD target
+            with torch.no_grad():
+                if done or not actionListNext:
+                    td_target = reward
+                else:
+                    obs_next = obs_next.float().to(device)
+                    history_next = history_next.float().to(device)
+                    inps = []
+                    for act_entry in actionListNext:
+                        act_emb_next = encode_card(process_card_list(act_entry)).flatten().to(device)
+                        inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
+                    batched_inp = torch.stack(inps, dim=0)
+                    batched_hist = history_next.expand(len(inps), -1, -1)
+                    max_q_next = target_net(batched_inp, batched_hist).squeeze(-1).max().item()
+                    td_target = reward + gamma * max_q_next
+
+            target = torch.FloatTensor([td_target]).to(device).squeeze()
             loss = F.mse_loss(q_curr, target)
             total_loss += loss
             losses.append(loss.item())

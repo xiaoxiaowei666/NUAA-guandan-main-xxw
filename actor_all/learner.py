@@ -24,7 +24,7 @@ import numpy as np
 
 sys.path.append(os.path.abspath('.'))
 from model import ActionValueNet
-from util import encode_card, now_str, check_path
+from util import encode_card, now_str, check_path, process_card_list
 
 
 class LearnerGUI:
@@ -38,6 +38,8 @@ class LearnerGUI:
         self.use_none = tk.BooleanVar(value=False)
         self.device = tk.StringVar(value="cuda")
         self.lr = tk.DoubleVar(value=1e-4)
+        self.gamma = tk.DoubleVar(value=0.98)          # TD 折扣因子
+        self.target_update_freq = tk.IntVar(value=100)  # target 网络同步频率（训练步）
         self.replay_capacity = tk.IntVar(value=200000)
         self.batch_size = tk.IntVar(value=512)
         self.save_interval = tk.IntVar(value=50)       # 每50次训练保存
@@ -53,6 +55,7 @@ class LearnerGUI:
         self.running = False
 
         self.model = None
+        self.target_model = None    # target network，用于稳定 TD bootstrap
         self.optimizer = None
         self.replay_buffer = deque(maxlen=self.replay_capacity.get())
         self.buffer_lock = threading.Lock()
@@ -67,6 +70,8 @@ class LearnerGUI:
         self.log_interval_val = None
         self.save_interval_val = None
         self.device_val = None
+        self.gamma_val = None
+        self.target_update_freq_val = None
 
         self.build_ui()
 
@@ -105,6 +110,13 @@ class LearnerGUI:
 
         ttk.Label(param_frame, text="日志间隔(训):").grid(row=row, column=2, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.log_interval, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
+        row += 1
+
+        ttk.Label(param_frame, text="Gamma (TD):").grid(row=row, column=0, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.gamma, width=10).grid(row=row, column=1, padx=5, sticky=tk.W)
+
+        ttk.Label(param_frame, text="Target同步频率:").grid(row=row, column=2, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.target_update_freq, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
         row += 1
 
         ttk.Label(param_frame, text="PUB 端口:").grid(row=row, column=0, sticky=tk.W)
@@ -170,6 +182,8 @@ class LearnerGUI:
 
         try:
             lr = self.lr.get()
+            gamma = self.gamma.get()
+            target_update_freq = self.target_update_freq.get()
             batch_size = self.batch_size.get()
             replay_capacity = self.replay_capacity.get()
             save_interval = self.save_interval.get()
@@ -186,6 +200,8 @@ class LearnerGUI:
         self.log_interval_val = log_interval
         self.save_interval_val = save_interval
         self.device_val = device
+        self.gamma_val = gamma
+        self.target_update_freq_val = target_update_freq
 
         # 加载模型
         if self.use_none.get():
@@ -206,6 +222,11 @@ class LearnerGUI:
         except Exception as e:
             messagebox.showerror("错误", f"模型加载失败: {e}")
             return
+
+        # 创建 target network，初始同步
+        self.target_model = ActionValueNet().to(device)
+        self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model.eval()
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.replay_buffer = deque(maxlen=replay_capacity)
@@ -296,20 +317,39 @@ class LearnerGUI:
         self.master.after(0, _update)
 
     def train_step(self, batch):
-        """执行一次训练步骤，返回平均损失"""
+        """TD(0) 训练步骤：target = r + gamma * max_a' Q(s', a') * (1 - done)"""
         self.model.train()
         total_loss = 0.0
         self.optimizer.zero_grad()
         device = self.device_val
+        gamma = self.gamma_val
 
-        for obs, history, act, reward, _, _, _, _ in batch:
-            obs = obs.to(device)
+        for obs, history, act, reward, obs_next, actionListNext, history_next, done in batch:
+            obs = obs.float().to(device)
             history = history.float().to(device)
             act_emb = encode_card(act).flatten().to(device)
-            target = torch.tensor([reward], dtype=torch.float32, device=device)
 
             state_curr = torch.cat((obs.flatten(), act_emb)).unsqueeze(0)
             q_curr = self.model(state_curr, history).sum()
+
+            # TD target: 终局状态只用 reward，否则加 bootstrapped 未来值
+            with torch.no_grad():
+                if done or not actionListNext:
+                    td_target = reward
+                else:
+                    obs_next = obs_next.float().to(device)
+                    history_next = history_next.float().to(device)
+                    # 批量计算所有候选动作的 Q(s', a')
+                    inps = []
+                    for act_entry in actionListNext:
+                        act_emb_next = encode_card(process_card_list(act_entry)).flatten().to(device)
+                        inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
+                    batched_inp = torch.stack(inps, dim=0)              # [N, 493]
+                    batched_hist = history_next.expand(len(inps), -1, -1)  # [N, T, 60]
+                    max_q_next = self.target_model(batched_inp, batched_hist).squeeze(-1).max().item()
+                    td_target = reward + gamma * max_q_next
+
+            target = torch.tensor(td_target, dtype=torch.float32, device=device)
             loss = torch.nn.functional.mse_loss(q_curr, target)
             total_loss += loss
 
@@ -354,25 +394,32 @@ class LearnerGUI:
                     self.log(f"❌ 接收异常: {e}")
 
     def _train_loop(self):
-        """训练线程：定期检查 buffer，满足条件则执行一次或多次训练并广播"""
+        """训练线程：持续训练，buffer 不够时短暂休眠"""
         self.log(f"🔍 训练线程启动，batch_size_val={self.batch_size_val}")
         train_count = 0
+        idle_count = 0
         while self.running:
-            time.sleep(1)
             with self.buffer_lock:
                 buffer_len = len(self.replay_buffer)
             if buffer_len >= self.batch_size_val:
+                idle_count = 0
+                # 每次唤醒训练更多 batch，充分利用 buffer
+                batches_per_wake = min(10, buffer_len // self.batch_size_val)
                 try:
-                    for step in range(2):  # 连续多个batch
+                    for step in range(batches_per_wake):
                         with self.buffer_lock:
                             if len(self.replay_buffer) < self.batch_size_val:
                                 break
                             batch = random.sample(self.replay_buffer, self.batch_size_val)
                         loss = self.train_step(batch)
                         train_count += 1
+                        # 定期同步 target network
+                        if train_count % self.target_update_freq_val == 0:
+                            self.target_model.load_state_dict(self.model.state_dict())
+                            self.log(f"🎯 Target 网络已同步 (训练#{train_count})")
                         if train_count % self.log_interval_val == 0:
                             self.log(f"🔄 训练 #{train_count} | Loss: {loss:.4f} | Buffer: {buffer_len}")
-                        if train_count % 5 == 0:  # 每 10 次训练广播一次（可按需调整）
+                        if train_count % 5 == 0:
                             self.broadcast_weights()
                         if train_count % self.save_interval_val == 0:
                             save_path = os.path.join(self.save_dir, f"learner_train{train_count}.pth")
@@ -383,6 +430,11 @@ class LearnerGUI:
                             self.log(f"💾 模型已保存: {save_path}")
                 except Exception as e:
                     self.log(f"❌ 训练异常: {e}")
+            else:
+                # buffer 数据不够，逐步增加等待时间（最多 2 秒）
+                idle_count += 1
+                sleep_time = min(0.1 * idle_count, 2.0)
+                time.sleep(sleep_time)
 
 
 if __name__ == "__main__":

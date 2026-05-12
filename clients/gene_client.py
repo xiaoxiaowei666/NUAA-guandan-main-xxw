@@ -371,12 +371,14 @@ class ReinforcementAction:
         self.last_act = None
         self.history_action = [['PASS', 'PASS', 'PASS']]
 
+    PASS_PENALTY = 0.05
+
     def apply_final_reward(self, final_reward):
         if not self.episode_transitions:
             return
         for i, trans in enumerate(self.episode_transitions):
             t = list(trans)
-            t[3] = final_reward          # MC 目标
+            t[3] = final_reward - (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
             if i == len(self.episode_transitions) - 1:
                 t[7] = True
             self.replay_memory.append(tuple(t))
@@ -433,9 +435,9 @@ class ReinforcementAction:
                 self.last_obs.cpu(),
                 self.last_history.cpu(),
                 self.last_act,
-                0.0,                     # 中间奖励仍为 0，无过程奖励
+                0.0,
                 state.cpu(),
-                self.action,
+                self.action,             # A' = 当前步动作列表（不是上一轮的）
                 history.cpu(),
                 False
             )
