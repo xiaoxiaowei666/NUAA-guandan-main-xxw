@@ -180,9 +180,9 @@ class InferenceClient(BaseClient):
             action_idx = random.randint(0, act_range)
 
         if action_idx == pass_idx and act_range > 0:
-            if random.random() < 0.8:
-                non_pass_indices = [i for i in range(act_range + 1) if i != pass_idx]
-                action_idx = max(non_pass_indices, key=lambda i: q_vals[i])
+            non_pass_indices = [i for i in range(act_range + 1) if i != pass_idx]
+            # 随机选一个非 PASS 动作，而不是用 Q 值最大的
+            action_idx = random.choice(non_pass_indices)
 
         act = process_card_list(action_list[action_idx])
 

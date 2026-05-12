@@ -22,7 +22,7 @@ import zmq
 import torch
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.abspath('.'))
 from model import ActionValueNet
 from util import encode_card, now_str, check_path
 
@@ -141,7 +141,7 @@ class LearnerGUI:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def browse_model(self):
-        initdir = os.path.abspath("./model") if os.path.exists("./model") else os.getcwd()
+        initdir = os.path.abspath("./model") if os.path.exists("../model") else os.getcwd()
         filename = filedialog.askopenfilename(
             title="选择模型文件",
             initialdir=initdir,
@@ -210,7 +210,7 @@ class LearnerGUI:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.replay_buffer = deque(maxlen=replay_capacity)
         self.step_count = 0
-        self.save_dir = f"model/checkpoints_{now_str()}_learner"
+        self.save_dir = f"../model/checkpoints_{now_str()}_learner"
         os.makedirs(self.save_dir, exist_ok=True)
 
         # ZMQ 初始化
