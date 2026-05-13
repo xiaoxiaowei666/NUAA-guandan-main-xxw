@@ -346,8 +346,11 @@ class LearnerGUI:
                         inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
                     batched_inp = torch.stack(inps, dim=0)              # [N, 493]
                     batched_hist = history_next.expand(len(inps), -1, -1)  # [N, T, 60]
-                    max_q_next = self.target_model(batched_inp, batched_hist).squeeze(-1).max().item()
-                    td_target = reward + gamma * max_q_next
+                    # Double Q：online 选动作，target 打分，消除最大化偏差
+                    online_qs = self.model(batched_inp, batched_hist).squeeze(-1)
+                    best_idx = online_qs.argmax().item()
+                    target_qs = self.target_model(batched_inp, batched_hist).squeeze(-1)
+                    td_target = reward + gamma * target_qs[best_idx].item()
 
             target = torch.tensor(td_target, dtype=torch.float32, device=device)
             loss = torch.nn.functional.mse_loss(q_curr, target)

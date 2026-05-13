@@ -154,8 +154,11 @@ class MemoryBuffer:
                         inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
                     batched_inp = torch.stack(inps, dim=0)
                     batched_hist = history_next.expand(len(inps), -1, -1)
-                    max_q_next = target_net(batched_inp, batched_hist).squeeze(-1).max().item()
-                    td_target = reward + gamma * max_q_next
+                    # Double Q：online 选动作，target 打分
+                    online_qs = ValueNet(batched_inp, batched_hist).squeeze(-1)
+                    best_idx = online_qs.argmax().item()
+                    target_qs = target_net(batched_inp, batched_hist).squeeze(-1)
+                    td_target = reward + gamma * target_qs[best_idx].item()
 
             target = torch.FloatTensor([td_target]).to(device).squeeze()
             loss = F.mse_loss(q_curr, target)
