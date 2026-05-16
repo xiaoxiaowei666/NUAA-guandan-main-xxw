@@ -113,15 +113,15 @@ class ImitationAction:
         probs = torch.softmax(q_tensor, dim=0).detach().cpu().numpy()
         return np.random.choice(len(q_vals), p=probs)
 
-    def parse(self, msg, render=False):
+    def parse(self, msg, render=False, state=None):
         """每步决策，并记录专家样本"""
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
         if render:
             print(Back.BLUE, f"可选动作范围: 0 至 {self.act_range}", Style.RESET_ALL)
 
-        # 专家动作
-        expert_idx = self.expert.parse_AI(msg, msg.get("myPos", 0))
+        # 专家动作（传递 state 以便规则型教练使用）
+        expert_idx = self.expert.parse_AI(msg, msg.get("myPos", 0), state)
         expert_idx = np.clip(expert_idx, 0, self.act_range).tolist()
 
         # 记录样本
@@ -221,7 +221,7 @@ class ImitationDistClient(WebSocketClient):
             self.action.decay_expert_prob()
 
         if "actionList" in msg:
-            act_idx = self.action.parse(msg, self.render)
+            act_idx = self.action.parse(msg, self.render, self.state)
             self.send(json.dumps({"actIndex": act_idx}))
 
     def send_expert_samples(self):
@@ -251,13 +251,13 @@ def main():
     im_parser.add_argument("-r", "--render", action="store_true")
     im_parser.add_argument("--host", default="127.0.0.1")
     im_parser.add_argument("--port", type=int, default=23456)
-    im_parser.add_argument("--device", default="cuda")
+    im_parser.add_argument("--device", default="cpu")
     im_parser.add_argument("--learner_host", default="127.0.0.1")
     im_parser.add_argument("--learner_port", type=int, default=10003)
-    im_parser.add_argument("--expert_init", type=float, default=1.0, help="初始专家概率")
+    im_parser.add_argument("--expert_init", type=float, default=0.1, help="初始专家概率")
     im_parser.add_argument("--expert_decay", type=float, default=0.995, help="专家概率衰减因子")
     im_parser.add_argument("--min_expert_prob", type=float, default=0.1, help="最低专家概率")
-    im_parser.add_argument("--expert", default="EggPan", help="专家教练名称（对应 coach/<Name>/action.py）")
+    im_parser.add_argument("--expert", default="TOP", help="专家教练名称（对应 coach/<Name>/action.py)")
 
     args = parser.parse_args()
 

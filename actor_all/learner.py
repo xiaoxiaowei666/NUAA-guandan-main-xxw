@@ -40,7 +40,7 @@ class LearnerGUI:
         self.lr = tk.DoubleVar(value=1e-4)
         self.gamma = tk.DoubleVar(value=0.98)          # TD 折扣因子
         self.target_update_freq = tk.IntVar(value=100)  # target 网络同步频率（训练步）
-        self.replay_capacity = tk.IntVar(value=200000)
+        self.replay_capacity = tk.IntVar(value=30000)
         self.batch_size = tk.IntVar(value=512)
         self.save_interval = tk.IntVar(value=50)       # 每50次训练保存
         self.log_interval = tk.IntVar(value=1)         # 每次训练都打印
@@ -303,7 +303,7 @@ class LearnerGUI:
                         count = self.ready_count
                     self.update_ready_display()
                     self.log(f"🔌 客户端就绪 ({count}/{self.expected})")
-                    if count == self.expected:
+                    if count % self.expected == 0:
                         self.log("✅ 全部客户端已就绪，广播初始权重")
                         self.broadcast_weights()
             except zmq.ZMQError:
@@ -317,9 +317,12 @@ class LearnerGUI:
         self.master.after(0, _update)
 
     def train_step(self, batch):
-        """TD(0) 训练步骤：target = r + gamma * max_a' Q(s', a') * (1 - done)"""
+        """Double-Q 训练步骤，返回 (avg_loss, avg_q, avg_target, avg_reward)"""
         self.model.train()
         total_loss = 0.0
+        total_q = 0.0
+        total_target = 0.0
+        total_reward = 0.0
         self.optimizer.zero_grad()
         device = self.device_val
         gamma = self.gamma_val
@@ -341,27 +344,38 @@ class LearnerGUI:
                     history_next = history_next.float().to(device)
                     # 批量计算所有候选动作的 Q(s', a')
                     inps = []
+                    pass_mask = []
                     for act_entry in actionListNext:
                         act_emb_next = encode_card(process_card_list(act_entry)).flatten().to(device)
                         inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
+                        pass_mask.append(act_entry[0] == 'PASS')
                     batched_inp = torch.stack(inps, dim=0)              # [N, 493]
                     batched_hist = history_next.expand(len(inps), -1, -1)  # [N, T, 60]
-                    # Double Q：online 选动作，target 打分，消除最大化偏差
                     online_qs = self.model(batched_inp, batched_hist).squeeze(-1)
-                    best_idx = online_qs.argmax().item()
                     target_qs = self.target_model(batched_inp, batched_hist).squeeze(-1)
-                    td_target = reward + gamma * target_qs[best_idx].item()
+                    # 排除 PASS 动作：防止 Q(PASS) 膨胀导致训练崩塌
+                    pass_mask_t = torch.tensor(pass_mask, device=device)
+                    if pass_mask_t.all():
+                        td_target = reward  # 全是 PASS 时不引导
+                    else:
+                        online_qs_masked = online_qs.masked_fill(pass_mask_t, float('-inf'))
+                        best_idx = online_qs_masked.argmax().item()
+                        td_target = reward + gamma * target_qs[best_idx].item()
 
             target = torch.tensor(td_target, dtype=torch.float32, device=device)
             loss = torch.nn.functional.mse_loss(q_curr, target)
             total_loss += loss
+            total_q += q_curr.item()
+            total_target += td_target
+            total_reward += reward
 
-        avg_loss = total_loss / len(batch)
+        n = len(batch)
+        avg_loss = total_loss / n
         avg_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
         self.model.eval()
-        return avg_loss.item()
+        return avg_loss.item(), total_q / n, total_target / n, total_reward / n
 
     def broadcast_weights(self):
         if not self.pub_socket:
@@ -414,14 +428,18 @@ class LearnerGUI:
                             if len(self.replay_buffer) < self.batch_size_val:
                                 break
                             batch = random.sample(self.replay_buffer, self.batch_size_val)
-                        loss = self.train_step(batch)
+                        loss, avg_q, avg_target, avg_r = self.train_step(batch)
                         train_count += 1
                         # 定期同步 target network
                         if train_count % self.target_update_freq_val == 0:
                             self.target_model.load_state_dict(self.model.state_dict())
                             self.log(f"🎯 Target 网络已同步 (训练#{train_count})")
                         if train_count % self.log_interval_val == 0:
-                            self.log(f"🔄 训练 #{train_count} | Loss: {loss:.4f} | Buffer: {buffer_len}")
+                            self.log(
+                                f"🔄 训练 #{train_count} | Loss: {loss:.4f} | "
+                                f"Q均值: {avg_q:+.2f} | Target均值: {avg_target:+.2f} | "
+                                f"Reward均值: {avg_r:+.2f} | Buffer: {buffer_len}"
+                            )
                         if train_count % 5 == 0:
                             self.broadcast_weights()
                         if train_count % self.save_interval_val == 0:

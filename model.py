@@ -32,8 +32,8 @@ class ActionValueNet(nn.Module):
             CrossUnit(1024, 1024, 1024),
             CrossUnit(1024, 1024, 1024),
             CrossUnit(1024, 1024, 512),
-            CrossUnit(512, 512, 1)          # 输出1维Q值
         )
+        self.value_head = nn.Linear(512, 1)  # 无激活函数，Q 值可正可负
 
     def forward(self, state, history):
         # state: [B, 492]
@@ -41,5 +41,5 @@ class ActionValueNet(nn.Module):
         out, (h_n, _) = self.lstm(history)
         # 取最后一个时间步的LSTM输出
         state = torch.cat((out[:, -1, :], state), dim=1)   # [B, 512+492]
-        value = self.total_cross(state)                    # [B, 1]
+        value = self.value_head(self.total_cross(state))   # [B, 1]
         return value
