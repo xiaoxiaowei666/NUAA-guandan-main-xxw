@@ -101,7 +101,8 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
-            print("游戏开始, 我是{}号位，手牌:{}".format(self._myPos, self._handCards))
+            pass
+            #print("游戏开始, 我是{}号位，手牌:{}".format(self._myPos, self._handCards))
 
     def notify_play(self):
         """
@@ -119,7 +120,8 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
-            print("{}号位打出{}， 最大动作为{}号位打出的{}".format(self._curPos, self._curAction, self._greaterPos, self._greaterAction))
+            pass
+            #print("{}号位打出{}， 最大动作为{}号位打出的{}".format(self._curPos, self._curAction, self._greaterPos, self._greaterAction))
 
     def notify_tribute(self):
         """
@@ -134,9 +136,10 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
+            pass
             for tribute_result in self._result:
                 tribute_pos, receive_tribute_pos, card = tribute_result
-                print("{}号位向{}号位进贡{}".format(tribute_pos, receive_tribute_pos, card))
+                #print("{}号位向{}号位进贡{}".format(tribute_pos, receive_tribute_pos, card))
 
     def notify_anti(self):
         """
@@ -152,8 +155,10 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
+            pass
             for pos in self._antiPos:
-                print("{}号位玩家抗贡".format(pos))
+                pass
+               # print("{}号位玩家抗贡".format(pos))
 
     def notify_back(self):
         """
@@ -168,9 +173,10 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
+            pass
             for back_result in self._result:
                 back_pos, receive_back_pos, card = back_result
-                print("{}号位向{}号位还贡{}".format(back_pos, receive_back_pos, card))
+                #print("{}号位向{}号位还贡{}".format(back_pos, receive_back_pos, card))
 
     def notify_episode_over(self):
         """
@@ -187,10 +193,11 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
-            print("对局结束，完牌次序为{}，结束时所打的等级为{}".format(self._order, self._curRank))
+            pass
+           # print("对局结束，完牌次序为{}，结束时所打的等级为{}".format(self._order, self._curRank))
             for rest in self._restCards:
                 rest_pos, rest_cards = rest
-                print("{}号位剩余卡牌{}".format(rest_pos, rest_cards))
+                #print("{}号位剩余卡牌{}".format(rest_pos, rest_cards))
 
     def notify_game_over(self):
         """
@@ -205,7 +212,7 @@ class State(object):
         请仅在对应的JSON格式下访问对应的实例属性，若此时访问其他属性则很有可能是之前处理时未更新的实例属性，不具有准确性。
         """
         # TODO: 选手可自行做出其他处理
-        print("当前训练次数为{}, 设定的游戏次数为{}".format(self._curTimes, self._settingTimes))
+       # print("当前训练次数为{}, 设定的游戏次数为{}".format(self._curTimes, self._settingTimes))
 
     def notify_game_result(self):
         """
@@ -250,10 +257,11 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
-            print("我方等级:{}， 对方等级:{}， 当前等级{}".format(self._selfRank, self._oppoRank, self._curRank))
-            print("当前动作为{}号-动作{}， 最大动作为{}号-动作{}，目前可选动作如下:".format(
-                self._curPos, self._curAction, self._greaterPos, self._greaterAction)
-            )
+            pass
+           # print("我方等级:{}， 对方等级:{}， 当前等级{}".format(self._selfRank, self._oppoRank, self._curRank))
+           # print("当前动作为{}号-动作{}， 最大动作为{}号-动作{}，目前可选动作如下:".format(
+           #     self._curPos, self._curAction, self._greaterPos, self._greaterAction)
+           # )
 
     def act_tribute(self):
         """
@@ -282,8 +290,9 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
-            print("我方等级:{}， 对方等级:{}， 当前等级{}".format(self._selfRank, self._oppoRank, self._curRank))
-            print("轮到自己进贡，可进贡的牌有: ")
+            pass
+            #print("我方等级:{}， 对方等级:{}， 当前等级{}".format(self._selfRank, self._oppoRank, self._curRank))
+           # print("轮到自己进贡，可进贡的牌有: ")
 
     def act_back(self):
         """
@@ -312,5 +321,6 @@ class State(object):
         """
         # TODO: 选手可自行做出其他处理
         if self.render:
-            print("我方等级:{}， 对方等级:{}， 当前等级{}".format(self._selfRank, self._oppoRank, self._curRank))
-            print("轮到自己还贡，可还贡的牌有:")
+            pass
+            #print("我方等级:{}， 对方等级:{}， 当前等级{}".format(self._selfRank, self._oppoRank, self._curRank))
+            #print("轮到自己还贡，可还贡的牌有:")

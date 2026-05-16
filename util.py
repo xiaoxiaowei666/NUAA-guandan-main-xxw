@@ -1,59 +1,47 @@
 import torch
 from torch import nn
-from torch.nn import functional
+from torch.nn import functional as F
 import numpy as np
 import os
 from colorama import Back, Style
 from datetime import datetime
 from collections import deque
 import random
-from tqdm import tqdm
-
 
 card_color = ['S', 'H', 'C', 'D']
 card_score = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
-color2index = {v : i for i, v in enumerate(card_color)}
-score2index = {v : i for i, v in enumerate(card_score)}
+color2index = {v: i for i, v in enumerate(card_color)}
+score2index = {v: i for i, v in enumerate(card_score)}
 rank2index = {
-    '2' : 0,
-    '3' : 1,
-    '4' : 2,
-    '5' : 3,
-    '6' : 4,
-    '7' : 5,
-    '8' : 6,
-    '9' : 7,
-    't' : 8,  'T' : 8, 
-    'j' : 9,  'J' : 9,
-    'q' : 10,  'Q' : 10,
-    'k' : 11, 'K' : 11,
-    'a' : 12, 'A' : 12
+    '2': 0, '3': 1, '4': 2, '5': 3, '6': 4,
+    '7': 5, '8': 6, '9': 7,
+    't': 8, 'T': 8,
+    'j': 9, 'J': 9,
+    'q': 10, 'Q': 10,
+    'k': 11, 'K': 11,
+    'a': 12, 'A': 12
 }
 
-# embedding into a matrix shaped as 4 * 15
+
 def encode_card(card_list):
     embedding_matrix = np.zeros((4, 15))
     embedding_matrix = torch.LongTensor(embedding_matrix)
     if card_list is None:
         return embedding_matrix
     for card in card_list:
-        if   card == "PASS":      # 如果是PASS，那么用全0矩阵来表示这一次的行为
+        if card == "PASS":
             return embedding_matrix
-        if   card == "SB":        # 如果是小王，只需要在14列加数字
+        if card == "SB":
             embedding_matrix[3, 13] += 1
-        elif card == "HR":       # 如果是大王，只需要在15列加数字
+        elif card == "HR":
             embedding_matrix[3, 14] += 1
-        else:                    # 否则按照规则映射
+        else:
             color_index = color2index[card[0]]
             score_index = score2index[card[1]]
             embedding_matrix[color_index, score_index] += 1
-
     return embedding_matrix
 
 
-# 简单处理一下发过来的数据
-# ['PASS', 'PASS', 'PASS'] -> ['PASS', 'PASS', 'PASS']
-# ['Straight', 'T', ['ST', 'SJ', 'SQ', 'SK', 'HA']]  -> ['ST', 'SJ', 'SQ', 'SK', 'HA']
 def process_card_list(card):
     if card is None:
         return ('PASS', 'PASS', 'PASS')
@@ -62,27 +50,24 @@ def process_card_list(card):
     else:
         return card[-1]
 
-# 从服务器传回的 message 中选出我们需要的信息并编码 
+
 def encode_message(message):
     handcards_tensor = encode_card(message["handCards"])
-    playArea_tensor  = [encode_card(process_card_list(card["playArea"])) for card in message["publicInfo"]]
-    rest_tensor      = [card["rest"] for card in message["publicInfo"]]
-    # 剩余手牌从0到27 一共28种状态
+    playArea_tensor = [encode_card(process_card_list(card["playArea"])) for card in message["publicInfo"]]
+    rest_tensor = [card["rest"] for card in message["publicInfo"]]
     try:
-        rest_tensor      = functional.one_hot(torch.tensor(rest_tensor), num_classes=30)
+        rest_tensor = F.one_hot(torch.tensor(rest_tensor), num_classes=30)
     except:
         print(Back.RED, rest_tensor, Style.RESET_ALL)
-    rank_tensor      = functional.one_hot(torch.tensor([rank2index[message["curRank"]]]), num_classes=13)
-    # action_list      = [encode_card(card) if card[0] == "PASS" else encode_card(card[-1]) for card in message["actionList"]]
+    rank_tensor = F.one_hot(torch.tensor([rank2index[message["curRank"]]]), num_classes=13)
     return dict(
         handcards=handcards_tensor,
         playArea=playArea_tensor,
         rest_num=rest_tensor,
         rank_num=rank_tensor
-        # action_list=action_list        
     )
 
-# 状态整合方案一
+
 def StateCatEmbedding(message):
     encode_info = encode_message(message)
     state_tensor = torch.cat((
@@ -94,29 +79,28 @@ def StateCatEmbedding(message):
         torch.flatten(encode_info["rest_num"]),
         torch.flatten(encode_info["rank_num"])
     ), dim=0)
-
     return state_tensor
+
 
 def ActionEmbedding(message, action_index):
     action = message["actionList"][action_index]
     action_tensor = encode_card(process_card_list(action))
     return torch.flatten(action_tensor)
 
-# 方案一的一个整合接口
+
 def StateAndActionCatEmbedding(message, action_index):
-    state_tensor  = StateCatEmbedding(message)
+    state_tensor = StateCatEmbedding(message)
     action_tensor = ActionEmbedding(message, action_index)
+    return torch.cat((torch.flatten(state_tensor), torch.flatten(action_tensor)), dim=0)
 
-    return torch.cat((
-        torch.flatten(state_tensor), torch.flatten(action_tensor)
-    ), dim=0)
 
-def check_path(path : str, fail_text="") -> bool:
+def check_path(path: str, fail_text=""):
     if not os.path.exists(path):
         print(Back.RED, "文件/文件夹 {} 不存在!{}".format(path, fail_text), Style.RESET_ALL)
         exit(-1)
     else:
         return True
+
 
 def now_str():
     now = datetime.now()
@@ -125,65 +109,69 @@ def now_str():
     )
     return UUD
 
-class MemoryBuffer:
-    def __init__(self) -> None:
-        self.buffer = []
 
-    def append(self, state_tuple):
-        self.buffer.append(state_tuple)
+class MemoryBuffer:
+    def __init__(self, capacity=100000):
+        self.buffer = deque(maxlen=capacity)
+
+    def append(self, transition):
+        self.buffer.append(transition)
+
+    def sample(self, batch_size):
+        return random.sample(self.buffer, batch_size)
+
+    def __len__(self):
+        return len(self.buffer)
 
     def clear(self):
         self.buffer.clear()
-    
-    def learn_from(self, gamma, optimizer, ValueNet, device):
-        # 从后到前更新
+
+    def learn_batch(self, batch, ValueNet, target_net, optimizer, gamma, device):
+        """
+        TD(0) 训练：target = r + gamma * max_a' Q(s', a') * (1 - done)
+        target_net 参数保留以兼容调用方。
+        """
         losses = []
-        rewards = []
-        iter_wrapper = tqdm(range(len(self.buffer))[::-1])
-        iter_wrapper.set_description_str("training")
-        for i in iter_wrapper:
-            frame = self.buffer[i]
-            obs            = frame[0]
-            history        = frame[1]
-            act            = frame[2]
-            reward         = frame[3]
-            obs_next       = frame[4]
-            actionListNext = frame[5]
-            history_next   = frame[6]
-            done           = frame[7]
-            reward = torch.FloatTensor([reward]).to(device)
-            if done == False:
-                rewards.append(reward.item())
-                # 计算max Q(S, *)
-                q_values = []
-                for action_card in actionListNext:
-                    action = encode_card(process_card_list(action_card))
-                    state_input = torch.cat((obs_next.flatten(), action.flatten()), dim=0).float().to(device)
-                    state_action_input = state_input.unsqueeze(0).float().to(device)
-                    q_value : torch.Tensor = ValueNet(state_action_input, history_next).sum()
-                    q_values.append(q_value)
+        optimizer.zero_grad()
+        total_loss = 0.0
 
-                max_q = torch.argmax(torch.tensor(q_values))
-                target = reward + gamma * max_q
-            else:
-                rewards.append(reward.item())
-                target = reward
+        for obs, history, act, reward, obs_next, actionListNext, history_next, done in batch:
+            # 当前 Q 值
+            act_emb = encode_card(act).flatten().to(device)
+            state_curr = torch.cat((obs.flatten().to(device), act_emb)).unsqueeze(0)
+            q_curr = ValueNet(state_curr, history.float().to(device)).sum()
 
-            # 计算Q(St, At)
-            action = encode_card(act)
-            state_input = torch.cat((obs.flatten(), action.flatten()), dim=0).float().to(device)
-            state_action_input = state_input.unsqueeze(0).float().to(device)
+            # TD target
+            with torch.no_grad():
+                if done or not actionListNext:
+                    td_target = reward
+                else:
+                    obs_next = obs_next.float().to(device)
+                    history_next = history_next.float().to(device)
+                    inps = []
+                    for act_entry in actionListNext:
+                        act_emb_next = encode_card(process_card_list(act_entry)).flatten().to(device)
+                        inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
+                    batched_inp = torch.stack(inps, dim=0)
+                    batched_hist = history_next.expand(len(inps), -1, -1)
+                    # Double Q：online 选动作，target 打分
+                    online_qs = ValueNet(batched_inp, batched_hist).squeeze(-1)
+                    best_idx = online_qs.argmax().item()
+                    target_qs = target_net(batched_inp, batched_hist).squeeze(-1)
+                    td_target = reward + gamma * target_qs[best_idx].item()
 
-            q_value = ValueNet(state_action_input, history).sum().to(device)
-
-            loss = torch.square(q_value - target)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            target = torch.FloatTensor([td_target]).to(device).squeeze()
+            loss = F.mse_loss(q_curr, target)
+            total_loss += loss
             losses.append(loss.item())
 
-        self.clear()
-        return losses, rewards
+        avg_loss = total_loss / len(batch)
+        avg_loss.backward()
+        torch.nn.utils.clip_grad_norm_(ValueNet.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        return losses
+
 
 def lock_model_path(value, model_root="./model", keyword="value", reverse=True):
     iter_obj = os.listdir(model_root)
@@ -198,14 +186,14 @@ def lock_model_path(value, model_root="./model", keyword="value", reverse=True):
                     return os.path.join(check_path, pth)
     return ""
 
-def debugout(text, color : str = "BLUE"):
+
+def debugout(text, color: str = "BLUE"):
     pre_obj = getattr(Back, color.upper())
     print(pre_obj, text, Style.RESET_ALL)
 
 
 if __name__ == "__main__":
-    actionList = [['PASS', 'PASS', 'PASS'], ['Straight', 'T', ['ST', 'SJ', 'SQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'SJ', 'SQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'SJ', 'HQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'SJ', 'HQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'SJ', 'CQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'SJ', 'CQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'HJ', 'SQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'HJ', 'SQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'HJ', 'HQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'HJ', 'HQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'HJ', 'CQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'HJ', 'CQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'CJ', 'SQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'CJ', 'SQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'CJ', 'HQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'CJ', 'HQ', 'DK', 'HA']], ['Straight', 'T', ['ST', 'CJ', 'CQ', 'SK', 'HA']], ['Straight', 'T', ['ST', 'CJ', 'CQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'SJ', 'SQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'SJ', 'SQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'SJ', 'HQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'SJ', 'HQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'SJ', 'CQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'SJ', 'CQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'HJ', 'SQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'HJ', 'SQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'HJ', 'HQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'HJ', 'HQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'HJ', 'CQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'HJ', 'CQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'CJ', 'SQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'CJ', 'SQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'CJ', 'HQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'CJ', 'HQ', 'DK', 'HA']], ['Straight', 'T', ['DT', 'CJ', 'CQ', 'SK', 'HA']], ['Straight', 'T', ['DT', 'CJ', 'CQ', 'DK', 'HA']], ['Bomb', 'J', ['SJ', 'HJ', 'HJ', 'CJ']], ['StraightFlush', '7', ['S7', 'S8', 'S9', 'ST', 'SJ']], ['StraightFlush', '8', ['S8', 'S9', 'ST', 'SJ', 'SQ']], ['StraightFlush', '9', ['S9', 'ST', 'SJ', 'SQ', 'SK']]]
-    
+    actionList = [['PASS', 'PASS', 'PASS'], ['Straight', 'T', ['ST', 'SJ', 'SQ', 'SK', 'HA']]]
     for card_list in actionList:
         if card_list[0] == 'PASS':
             encode_card(card_list)

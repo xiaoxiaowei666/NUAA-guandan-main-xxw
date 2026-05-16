@@ -174,7 +174,8 @@ class MLPAction(object):
             print(Back.GREEN, "成功载入模型 : ", MODEL, " 3秒后开始训练", Style.RESET_ALL)
             time.sleep(3)
 
-        self.optimizer = torch.optim.SGD(self.ValueNet.parameters(), lr=LEARNING_RATE)   
+        #self.optimizer = torch.optim.SGD(self.ValueNet.parameters(), lr=LEARNING_RATE)
+        self.optimizer = torch.optim.Adam(self.ValueNet.parameters(), lr=LEARNING_RATE)
 
     def MapHistoryToLSTM(self):
         ret = torch.stack([encode_card(action).flatten() for action in self.history_action], dim=0)
