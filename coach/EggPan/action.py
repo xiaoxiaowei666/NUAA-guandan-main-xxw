@@ -19,7 +19,7 @@ class Action(object):
         return randint(0, self.act_range)
 
     #该为有AI加持的确定行动
-    def parse_AI(self, msg, pos):
+    def parse_AI(self, msg, pos, state=None):
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
         if self.render:

@@ -175,14 +175,16 @@ class InferenceClient(BaseClient):
                     q_vals.append(q)
 
         if random.random() > self.args.epsilon:
-            action_idx = int(np.argmax(q_vals))
+            # Greedy: 选最优非 PASS 动作，防止 PASS 崩塌
+            if pass_idx is not None and act_range > 0:
+                q_vals_masked = q_vals.copy()
+                q_vals_masked[pass_idx] = -float('inf')
+                action_idx = int(np.argmax(q_vals_masked))
+            else:
+                action_idx = int(np.argmax(q_vals))
         else:
+            # Exploration: 允许 PASS，让模型学习何时该让牌
             action_idx = random.randint(0, act_range)
-
-        if action_idx == pass_idx and act_range > 0:
-            non_pass_indices = [i for i in range(act_range + 1) if i != pass_idx]
-            # 随机选一个非 PASS 动作，而不是用 Q 值最大的
-            action_idx = random.choice(non_pass_indices)
 
         act = process_card_list(action_list[action_idx])
 
@@ -262,7 +264,7 @@ def main():
     # Rule 模式
     rule_parser = subparsers.add_parser("rule", help="规则/自定义教练")
     rule_parser.add_argument("pos", type=int, help="座位号")
-    rule_parser.add_argument("-c", "--client", default="Demo", help="教练名称")
+    rule_parser.add_argument("-c", "--client", default="TOP", help="教练名称")
     rule_parser.add_argument("-r", "--render", action="store_true")
     rule_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
     rule_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
@@ -274,7 +276,7 @@ def main():
     rl_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
     rl_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     rl_parser.add_argument("--device", default="cpu", help="推理设备")
-    rl_parser.add_argument("--epsilon", type=float, default=0.4, help="探索率")
+    rl_parser.add_argument("--epsilon", type=float, default=0.2, help="探索率")
     rl_parser.add_argument("--learner_host", default="127.0.0.1", help="Learner IP")
     rl_parser.add_argument("--learner_port", type=int, default=10002, help="Learner PUB 端口（用于接收权重）")
 

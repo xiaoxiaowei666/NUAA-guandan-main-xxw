@@ -21,7 +21,7 @@ import random
 import zmq
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.abspath('.'))
 from model import ActionValueNet
 from util import encode_card, now_str, check_path
 
@@ -37,7 +37,7 @@ class ImitationLearnerGUI:
         self.use_none = tk.BooleanVar(value=False)
         self.device = tk.StringVar(value="cuda")
         self.lr = tk.DoubleVar(value=1e-4)
-        self.dataset_capacity = tk.IntVar(value=200000)
+        self.dataset_capacity = tk.IntVar(value=30000)
         self.batch_size = tk.IntVar(value=512)
         self.save_interval = tk.IntVar(value=100)
         self.log_interval = tk.IntVar(value=10)
@@ -282,7 +282,7 @@ class ImitationLearnerGUI:
                         count = self.ready_count
                     self.update_ready_display()
                     self.log(f"🔌 客户端就绪 ({count}/{self.expected})")
-                    if count == self.expected:
+                    if count % self.expected == 0:
                         self.log("✅ 全部客户端已就绪，广播初始权重")
                         self.broadcast_weights()
             except zmq.ZMQError:
@@ -327,81 +327,84 @@ class ImitationLearnerGUI:
                     self.log(f"❌ 接收异常: {e}")
 
     def _train_loop(self):
-        print("Train loop started, batch_size:", self.batch_size_val)  # 加一行
+        """持续训练，数据集不够时短暂休眠"""
+        self.log(f"🔍 训练线程启动，batch_size_val={self.batch_size_val}")
+        idle_count = 0
         while self.running:
-            time.sleep(1)
             with self.dataset_lock:
                 dataset_len = len(self.dataset)
-            print(f"Dataset length: {dataset_len}, required: {self.batch_size_val}")  # 加一行
             if dataset_len >= self.batch_size_val:
+                idle_count = 0
+                batches_per_wake = min(10, dataset_len // self.batch_size_val)
                 try:
-                    for _ in range(2):
+                    for _ in range(batches_per_wake):
                         with self.dataset_lock:
                             if len(self.dataset) < self.batch_size_val:
                                 break
                             batch = random.sample(self.dataset, self.batch_size_val)
-                        loss = self._imitation_train_step(batch)
+                        loss, acc = self._imitation_train_step(batch)
                         self.train_count += 1
-                        print(f"Train step {self.train_count}, Loss: {loss:.4f}")  # 加一行
                         if self.train_count % self.log_interval_val == 0:
-                            save_path = os.path.join(self.save_dir, f"learner_train{self.train_count}.pth")
+                            self.log(f"🔄 训练 #{self.train_count} | Loss: {loss:.4f} | Acc: {acc:.2%} | 数据集: {dataset_len}")
+                        if self.train_count % self.save_interval_val == 0:
+                            save_path = os.path.join(self.save_dir, f"imitation_train{self.train_count}.pth")
                             torch.save({
                                 "model_state_dict": self.model.state_dict(),
                                 "model_class": ActionValueNet
                             }, save_path)
                             self.log(f"💾 模型已保存: {save_path}")
-                        if self.train_count % 10 == 0:
+                        if self.train_count % 5 == 0:
                             self.broadcast_weights()
-
                 except Exception as e:
-                    print(f"Train exception: {e}")  # 加一行
                     self.log(f"❌ 训练异常: {e}")
+            else:
+                idle_count += 1
+                sleep_time = min(0.1 * idle_count, 2.0)
+                time.sleep(sleep_time)
 
     def _imitation_train_step(self, batch):
-        """向量化加速版"""
+        """向量化训练步骤，返回 (avg_loss, accuracy)"""
         if not batch:
-            return 0.0
+            return 0.0, 0.0
 
         self.model.train()
         self.optimizer.zero_grad()
         device = self.device_val
         total_loss = 0.0
+        correct = 0
 
         for obs, history, action_embs, expert_idx in batch:
-            # 1. 堆叠动作嵌入 (num_actions, emb_dim)
             embs = torch.stack([emb.to(device).flatten() for emb in action_embs])
             num_actions = embs.shape[0]
 
-            # 2. 复制 obs (num_actions, obs_dim)
             obs_rep = obs.to(device).flatten().unsqueeze(0).repeat(num_actions, 1)
 
-            # 3. 处理 history —— 强制转为 3D (1, seq_len, feat_dim) 再复制
             h = history.float().to(device)
             while h.dim() > 3 and h.shape[0] == 1:
                 h = h.squeeze(0)
             while h.dim() > 3:
                 h = h[0]
             if h.dim() == 2:
-                h = h.unsqueeze(0)  # (1, seq_len, feat_dim)
+                h = h.unsqueeze(0)
             history_rep = h.repeat(num_actions, 1, 1)
 
-            # 4. 拼接一次前向
             inp = torch.cat((obs_rep, embs), dim=1)
-            qs = self.model(inp, history_rep).sum(dim=1)  # (num_actions,)
+            qs = self.model(inp, history_rep).sum(dim=1)
 
-            # 5. 损失
             loss = torch.nn.functional.cross_entropy(
                 qs.unsqueeze(0),
                 torch.tensor([expert_idx], device=device, dtype=torch.long)
             )
             total_loss += loss
+            correct += int(qs.argmax().item() == expert_idx)
 
         avg_loss = total_loss / len(batch)
+        accuracy = correct / len(batch)
         avg_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
         self.model.eval()
-        return avg_loss.item()
+        return avg_loss.item(), accuracy
 
 
 if __name__ == "__main__":

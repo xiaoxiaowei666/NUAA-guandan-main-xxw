@@ -60,7 +60,7 @@ def monitor_processes(procs, labels):
 def main():
     os.chdir(PROJECT_ROOT)
     print("=" * 60)
-    print("正在启动 4 张桌子（每桌 1 强化学习 + 3 EggPan 规则）...")
+    print("正在启动 4 张桌子（每桌 1 强化学习 + 3 TOP 规则）...")
     print("=" * 60)
 
     all_procs = []
@@ -81,8 +81,8 @@ def main():
     # 2. EggPan 规则客户端
     for port in TABLES:
         for seat in (2, 3, 4):
-            label = f"EggPan (port {port}, seat {seat})"
-            proc = start(port, "rule", seat, extra_args=["-c", "EggPan"])
+            label = f"TOP (port {port}, seat {seat})"
+            proc = start(port, "rule", seat, extra_args=["-c", "TOP"])
             all_procs.append(proc)
             all_labels.append(label)
             print(f"启动 {label}")

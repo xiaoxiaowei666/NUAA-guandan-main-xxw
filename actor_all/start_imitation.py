@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-启动 4 桌分布式模仿学习（每桌 1 个 ImitationDist + 3 个 EggPan 规则）
+启动 4 桌分布式模仿学习（每桌 1 个 ImitationDist + 3 个 TOP 规则）
 使用 tcli.py 启动规则客户端，使用 tcli_imitation.py 启动分布式DAgger客户端
 """
 
@@ -40,7 +40,7 @@ def start_rule(port, seat):
         PYTHON, RULE_CLIENT, "rule", str(seat),
         "--host", "127.0.0.1",
         "--port", str(port),
-        "-c", "EggPan"
+        "-c", "TOP"
     ]
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     return subprocess.Popen(
@@ -75,14 +75,14 @@ def main():
     rule_procs = []
     for port in TABLES:
         for seat in (2, 3, 4):
-            print(f"启动 EggPan 规则 (端口 {port}, 座位 {seat})...")
+            print(f"启动 TOP 规则 (端口 {port}, 座位 {seat})...")
             proc = start_rule(port, seat)
             rule_procs.append(proc)
 
     print("\n" + "=" * 60)
     print(f"全部客户端已启动！")
     print(f"  模仿学习: {len(im_procs)} 个")
-    print(f"  EggPan 规则: {len(rule_procs)} 个")
+    print(f"  TOP 规则: {len(rule_procs)} 个")
     print("所有进程在后台运行，关闭本窗口不会影响对局。")
     print("如需终止，请在任务管理器中结束 python 进程。")
     print("=" * 60)
