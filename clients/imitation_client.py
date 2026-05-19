@@ -604,25 +604,37 @@ class ExampleClient(WebSocketClient):
     def received_message(self, message):
         message = json.loads(str(message))
         self.state.parse(message)
+        message.setdefault("myPos", self.state._myPos)
 
         if message.get("stage") == "beginning":
             self.action.history_action = [['PASS', 'PASS', 'PASS']]
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif message.get("stage") in ("episodeOver", "gameOver"):
-            # 定期全量训练
             if self.episode % DAGGER_INTERVAL == 0:
                 print(Back.YELLOW +
                       f"[Episode {self.episode}] 全量训练, 数据集: {len(self.action.dataset)}" +
                       Style.RESET_ALL)
                 self.action.train_from_dataset(epochs=DAGGER_EPOCHS)
-            # 衰减专家概率
             self.action.use_expert_prob = max(MIN_EXPERT_PROB,
                                               self.action.use_expert_prob * EXPERT_DECAY)
             print(f"Expert prob = {self.action.use_expert_prob:.4f}")
 
+        if message.get("type") == "notify" and message.get("stage") == "play":
+            cur_action = message.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in message:
+            message["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_index = self.action.parse(message, self.render)
+            if message.get("stage") == "play":
+                chosen_action = message["actionList"][act_index]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_index}))
 
 # ======================= 核心动作/训练类 =======================

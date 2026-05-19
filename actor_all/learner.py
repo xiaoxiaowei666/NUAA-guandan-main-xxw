@@ -153,7 +153,7 @@ class LearnerGUI:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def browse_model(self):
-        initdir = os.path.abspath("./model") if os.path.exists("../model") else os.getcwd()
+        initdir = os.path.abspath("./model") if os.path.exists("model") else os.getcwd()
         filename = filedialog.askopenfilename(
             title="选择模型文件",
             initialdir=initdir,
@@ -231,7 +231,7 @@ class LearnerGUI:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.replay_buffer = deque(maxlen=replay_capacity)
         self.step_count = 0
-        self.save_dir = f"../model/checkpoints_{now_str()}_learner"
+        self.save_dir = f"model/checkpoints_{now_str()}_learner"
         os.makedirs(self.save_dir, exist_ok=True)
 
         # ZMQ 初始化
@@ -349,7 +349,7 @@ class LearnerGUI:
                         act_emb_next = encode_card(process_card_list(act_entry)).flatten().to(device)
                         inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
                         pass_mask.append(act_entry[0] == 'PASS')
-                    batched_inp = torch.stack(inps, dim=0)              # [N, 493]
+                    batched_inp = torch.stack(inps, dim=0)              # [N, 685]
                     batched_hist = history_next.expand(len(inps), -1, -1)  # [N, T, 60]
                     online_qs = self.model(batched_inp, batched_hist).squeeze(-1)
                     target_qs = self.target_model(batched_inp, batched_hist).squeeze(-1)

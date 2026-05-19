@@ -90,9 +90,11 @@ class ImitationClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg.get("stage") == "beginning":
             self.action.history_action = [['PASS', 'PASS', 'PASS']]
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg.get("stage") in ("episodeOver", "gameOver"):
@@ -104,8 +106,20 @@ class ImitationClient(BaseClient):
             self.action.use_expert_prob = max(self.args.min_expert_prob,
                                               self.action.use_expert_prob * self.args.expert_decay)
 
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_idx = self.action.parse(msg, self.render)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
 
@@ -266,9 +280,11 @@ class ReinforcementClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
             self.action.reset_episode()
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
@@ -278,7 +294,7 @@ class ReinforcementClient(BaseClient):
             # 训练
             if len(self.action.replay_memory) >= self.args.batch_size:
                 all_losses = []
-                last_batch_reward = 0.0  # 用于展示最后一个 batch 的平均奖励
+                last_batch_reward = 0.0
                 for _ in range(self.args.update_steps):
                     batch = self.action.replay_memory.sample(self.args.batch_size)
                     losses = self.action.replay_memory.learn_batch(
@@ -290,11 +306,9 @@ class ReinforcementClient(BaseClient):
                         self.args.device
                     )
                     all_losses.extend(losses)
-                    # 记录最后一个 batch 的平均奖励，方便日志展示
                     batch_rewards = [t[3] for t in batch]
                     last_batch_reward = sum(batch_rewards) / len(batch_rewards)
 
-                # 日志现在只在该写的时候写一次
                 if self.episode % self.args.log_interval == 0:
                     avg_loss = sum(all_losses) / len(all_losses) if all_losses else 0.0
                     self.write_log(
@@ -302,7 +316,6 @@ class ReinforcementClient(BaseClient):
                         f"reward_sample={last_batch_reward:.1f}"
                     )
 
-            # 衰减探索率
             self.action.decay_epsilon()
 
             if self.episode % self.args.save_interval == 0:
@@ -321,8 +334,20 @@ class ReinforcementClient(BaseClient):
             if self.episode % self.args.target_update_freq == 0:
                 self.action.sync_target_network()
 
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_idx = self.action.parse(msg, self.render)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
 
@@ -473,8 +498,10 @@ class TestClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
@@ -484,8 +511,20 @@ class TestClient(BaseClient):
                 self.wins += 1
             print(f"累计奖励: {self.rewards}, 胜率: {self.wins/len(self.rewards):.2%}")
 
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_idx = self.action.parse(msg, self.render)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
 

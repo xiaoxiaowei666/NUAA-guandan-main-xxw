@@ -127,6 +127,7 @@ class InferenceClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
             self.episode_transitions.clear()
@@ -135,6 +136,7 @@ class InferenceClient(BaseClient):
             self.last_act = None
             self.last_action_list = None
             self.history_action = [['PASS', 'PASS', 'PASS']]
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
@@ -147,8 +149,22 @@ class InferenceClient(BaseClient):
             self.last_history = None
             self.last_act = None
 
+        # 收到 notify/play 时累计已出牌统计（别人出牌）
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
+            msg["playedCards"] = self.played_cards
             act_idx = self.select_action(msg)
+            # 自己出牌也计入已出牌统计（进贡/还贡除外）
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
     def select_action(self, msg):
@@ -165,14 +181,13 @@ class InferenceClient(BaseClient):
         state = StateCatEmbedding(msg).to(self.device)
         history = self.MapHistoryToLSTM().float().to(self.device)
 
-        with self.weights_lock:
-            q_vals = []
-            with torch.no_grad():
-                for i in range(act_range + 1):
-                    act_emb = ActionEmbedding(msg, i).to(self.device)
-                    inp = torch.cat((state.flatten(), act_emb)).unsqueeze(0)
-                    q = self.model(inp, history).sum().item()
-                    q_vals.append(q)
+        q_vals = []
+        with torch.no_grad():
+            for i in range(act_range + 1):
+                act_emb = ActionEmbedding(msg, i).to(self.device)
+                inp = torch.cat((state.flatten(), act_emb)).unsqueeze(0)
+                q = self.model(inp, history).sum().item()
+                q_vals.append(q)
 
         if random.random() > self.args.epsilon:
             # Greedy: 选最优非 PASS 动作，防止 PASS 崩塌
@@ -234,6 +249,12 @@ class InferenceClient(BaseClient):
                 obs_np, hist_np, t[2], t[3],
                 next_obs_np, t[5], next_hist_np, t[7]
             ))
+        # 后台线程发送，避免阻塞 WebSocket 回调导致整桌冻结
+        threading.Thread(
+            target=self._send_experience_async, args=(data,), daemon=True
+        ).start()
+
+    def _send_experience_async(self, data):
         try:
             self.push_socket.send(pickle.dumps(data))
             print(f"已发送 {len(data)} 条经验至 Learner")
@@ -276,7 +297,7 @@ def main():
     rl_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
     rl_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     rl_parser.add_argument("--device", default="cpu", help="推理设备")
-    rl_parser.add_argument("--epsilon", type=float, default=0.2, help="探索率")
+    rl_parser.add_argument("--epsilon", type=float, default=0.25, help="探索率")
     rl_parser.add_argument("--learner_host", default="127.0.0.1", help="Learner IP")
     rl_parser.add_argument("--learner_port", type=int, default=10002, help="Learner PUB 端口（用于接收权重）")
 
