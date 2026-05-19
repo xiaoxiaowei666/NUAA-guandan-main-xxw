@@ -1,0 +1,202 @@
+{
+  "id": "2026-05-18-115726",
+  "generated_at": "2026-05-18T03:57:26.413925Z",
+  "language": "zh",
+  "pages": [
+    {
+      "slug": "1-gai-shu-ji-yu-shen-du-xue-xi-de-guan-dan-aixi-tong",
+      "title": "概述：基于深度学习的掼蛋AI系统",
+      "file": "1-gai-shu-ji-yu-shen-du-xue-xi-de-guan-dan-aixi-tong.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "2-kuai-su-qi-dong-xing-ming-ling-yun-xing-aidui-ju",
+      "title": "快速启动：一行命令运行AI对局",
+      "file": "2-kuai-su-qi-dong-xing-ming-ling-yun-xing-aidui-ju.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "3-xiang-mu-jia-gou-zong-lan-cong-fu-wu-duan-dao-ke-hu-duan-de-wan-zheng-dui-ju-liu-cheng",
+      "title": "项目架构总览：从服务端到客户端的完整对局流程",
+      "file": "3-xiang-mu-jia-gou-zong-lan-cong-fu-wu-duan-dao-ke-hu-duan-de-wan-zheng-dui-ju-liu-cheng.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "4-huan-jing-zhun-bei-pythonyi-lai-mo-ni-qi-fu-wu-duan-yu-gpupei-zhi",
+      "title": "环境准备：Python依赖、模拟器服务端与GPU配置",
+      "file": "4-huan-jing-zhun-bei-pythonyi-lai-mo-ni-qi-fu-wu-duan-yu-gpupei-zhi.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "5-guiqi-dong-qi-shi-yong-tu-xing-jie-mian-guan-li-duo-ke-hu-duan-dui-ju",
+      "title": "GUI启动器：使用图形界面管理多客户端对局",
+      "file": "5-guiqi-dong-qi-shi-yong-tu-xing-jie-mian-guan-li-duo-ke-hu-duan-dui-ju.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "6-mo-fang-xue-xi-yuan-li-daggersuan-fa-yu-zhuan-jia-ce-lue-hun-he-cai-yang",
+      "title": "模仿学习原理：DAgger算法与专家策略混合采样",
+      "file": "6-mo-fang-xue-xi-yuan-li-daggersuan-fa-yu-zhuan-jia-ce-lue-hun-he-cai-yang.md",
+      "section": "核心训练系统",
+      "group": "模仿学习",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "7-train-py-xun-lian-ru-kou-ming-ling-xing-can-shu-yu-yamlpei-zhi-lian-dong",
+      "title": "train.py 训练入口：命令行参数与YAML配置联动",
+      "file": "7-train-py-xun-lian-ru-kou-ming-ling-xing-can-shu-yu-yamlpei-zhi-lian-dong.md",
+      "section": "核心训练系统",
+      "group": "模仿学习",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "8-fen-bu-shi-dagger-learneryan-bo-quan-zhong-ke-hu-duan-shou-ji-zhuan-jia-yang-ben",
+      "title": "分布式DAgger：Learner广播权重 + 客户端收集专家样本",
+      "file": "8-fen-bu-shi-dagger-learneryan-bo-quan-zhong-ke-hu-duan-shou-ji-zhuan-jia-yang-ben.md",
+      "section": "核心训练系统",
+      "group": "模仿学习",
+      "level": "Advanced"
+    },
+    {
+      "slug": "9-dqnxun-lian-liu-cheng-jing-yan-hui-fang-tan-suo-ce-lue-yu-tdmu-biao-geng-xin",
+      "title": "DQN训练流程：经验回放、探索策略与TD目标更新",
+      "file": "9-dqnxun-lian-liu-cheng-jing-yan-hui-fang-tan-suo-ce-lue-yu-tdmu-biao-geng-xin.md",
+      "section": "核心训练系统",
+      "group": "强化学习",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "10-fen-bu-shi-qiang-hua-xue-xi-zmq-pub-subjia-gou-xia-de-duo-ke-hu-duan-bing-xing-xun-lian",
+      "title": "分布式强化学习：ZMQ PUB-SUB架构下的多客户端并行训练",
+      "file": "10-fen-bu-shi-qiang-hua-xue-xi-zmq-pub-subjia-gou-xia-de-duo-ke-hu-duan-bing-xing-xun-lian.md",
+      "section": "核心训练系统",
+      "group": "强化学习",
+      "level": "Advanced"
+    },
+    {
+      "slug": "11-zi-bo-yi-xun-lian-xi-tong-mo-xing-chi-guan-li-re-jia-zai-dui-shou-yu-die-dai-dui-kang",
+      "title": "自博弈训练系统：模型池管理、热加载对手与迭代对抗",
+      "file": "11-zi-bo-yi-xun-lian-xi-tong-mo-xing-chi-guan-li-re-jia-zai-dui-shou-yu-die-dai-dui-kang.md",
+      "section": "核心训练系统",
+      "group": "强化学习",
+      "level": "Advanced"
+    },
+    {
+      "slug": "12-shen-jing-wang-luo-jia-gou-actionvaluenetde-lstmli-shi-jian-mo-yu-crossunitcan-chai-wang-luo",
+      "title": "神经网络架构：ActionValueNet的LSTM历史建模与CrossUnit残差网络",
+      "file": "12-shen-jing-wang-luo-jia-gou-actionvaluenetde-lstmli-shi-jian-mo-yu-crossunitcan-chai-wang-luo.md",
+      "section": "模型与特征工程",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "13-zhuang-tai-bian-ma-she-ji-shou-pai-chu-pai-qu-sheng-yu-pai-shu-yu-ji-pai-de-duo-wei-qian-ru",
+      "title": "状态编码设计：手牌、出牌区、剩余牌数与级牌的多维嵌入",
+      "file": "13-zhuang-tai-bian-ma-she-ji-shou-pai-chu-pai-qu-sheng-yu-pai-shu-yu-ji-pai-de-duo-wei-qian-ru.md",
+      "section": "模型与特征工程",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "14-dong-zuo-bian-ma-yu-li-shi-xu-lie-chu-pai-li-shi-de-lstmshi-xu-jian-mo",
+      "title": "动作编码与历史序列：出牌历史的LSTM时序建模",
+      "file": "14-dong-zuo-bian-ma-yu-li-shi-xu-lie-chu-pai-li-shi-de-lstmshi-xu-jian-mo.md",
+      "section": "模型与特征工程",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "15-jiang-li-han-shu-she-ji-wan-pai-ci-xu-dao-biao-liang-jiang-li-de-ying-she-ce-lue",
+      "title": "奖励函数设计：完牌次序到标量奖励的映射策略",
+      "file": "15-jiang-li-han-shu-she-ji-wan-pai-ci-xu-dao-biao-liang-jiang-li-de-ying-she-ce-lue.md",
+      "section": "模型与特征工程",
+      "level": "Advanced"
+    },
+    {
+      "slug": "16-jiao-lian-zhu-ce-ji-zhi-coachmo-kuai-de-dong-tai-dao-ru-yu-loadcoachgong-han-mo-shi",
+      "title": "教练注册机制：coach模块的动态导入与LoadCoach工厂模式",
+      "file": "16-jiao-lian-zhu-ce-ji-zhi-coachmo-kuai-de-dong-tai-dao-ru-yu-loadcoachgong-han-mo-shi.md",
+      "section": "教练系统与对手引擎",
+      "level": "Beginner"
+    },
+    {
+      "slug": "17-eggpanzhuan-jia-ce-lue-ji-yu-quan-zhong-de-qi-fa-shi-chu-pai-jue-ce",
+      "title": "EggPan专家策略：基于权重的启发式出牌决策",
+      "file": "17-eggpanzhuan-jia-ce-lue-ji-yu-quan-zhong-de-qi-fa-shi-chu-pai-jue-ce.md",
+      "section": "教练系统与对手引擎",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "18-topzhuan-jia-ce-lue-wan-zheng-de-guan-dan-gui-ze-yin-qing-yu-pai-xing-zu-he-sou-suo",
+      "title": "TOP专家策略：完整的掼蛋规则引擎与牌型组合搜索",
+      "file": "18-topzhuan-jia-ce-lue-wan-zheng-de-guan-dan-gui-ze-yin-qing-yu-pai-xing-zu-he-sou-suo.md",
+      "section": "教练系统与对手引擎",
+      "level": "Advanced"
+    },
+    {
+      "slug": "19-zi-bo-yi-dui-shou-ke-hu-duan-gu-ding-jian-cha-dian-de-que-ding-xing-tui-li-da-pai",
+      "title": "自博弈对手客户端：固定检查点的确定性推理打牌",
+      "file": "19-zi-bo-yi-dui-shou-ke-hu-duan-gu-ding-jian-cha-dian-de-que-ding-xing-tui-li-da-pai.md",
+      "section": "教练系统与对手引擎",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "20-launch-py-duo-jin-cheng-bian-pai-fu-wu-duan-yu-si-ke-hu-duan-bing-xing-qi-dong-yu-sheng-ming-zhou-qi-guan-li",
+      "title": "launch.py 多进程编排：服务端与四客户端并行启动与生命周期管理",
+      "file": "20-launch-py-duo-jin-cheng-bian-pai-fu-wu-duan-yu-si-ke-hu-duan-bing-xing-qi-dong-yu-sheng-ming-zhou-qi-guan-li.md",
+      "section": "架构深入",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "21-fen-bu-shi-learnershe-ji-zmq-pub-subquan-zhong-yan-bo-yu-jing-yan-shou-ji",
+      "title": "分布式Learner设计：ZMQ PUB-SUB权重广播与经验收集",
+      "file": "21-fen-bu-shi-learnershe-ji-zmq-pub-subquan-zhong-yan-bo-yu-jing-yan-shou-ji.md",
+      "section": "架构深入",
+      "level": "Advanced"
+    },
+    {
+      "slug": "22-zhuang-tai-ji-jie-xi-statelei-de-xiao-xi-fen-fa-yu-you-xi-jie-duan-zi-dong-lu-you",
+      "title": "状态机解析：State类的消息分发与游戏阶段自动路由",
+      "file": "22-zhuang-tai-ji-jie-xi-statelei-de-xiao-xi-fen-fa-yu-you-xi-jie-duan-zi-dong-lu-you.md",
+      "section": "架构深入",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "23-ke-hu-duan-jing-jian-hua-tcli-pytong-ru-kou-yu-duo-mo-shi-lu-you",
+      "title": "客户端精简化：tcli.py统一入口与多模式路由",
+      "file": "23-ke-hu-duan-jing-jian-hua-tcli-pytong-ru-kou-yu-duo-mo-shi-lu-you.md",
+      "section": "架构深入",
+      "level": "Advanced"
+    },
+    {
+      "slug": "24-coachdan-yuan-ce-shi-yan-zheng-zhu-ce-zhi-neng-ti-de-zheng-chang-yun-xing",
+      "title": "coach单元测试：验证注册智能体的正常运行",
+      "file": "24-coachdan-yuan-ce-shi-yan-zheng-zhu-ce-zhi-neng-ti-de-zheng-chang-yun-xing.md",
+      "section": "测试与监控",
+      "level": "Beginner"
+    },
+    {
+      "slug": "25-xun-lian-guo-cheng-ke-shi-hua-value-logri-zhi-jie-xi-yu-sun-shi-jiang-li-qu-xian-hui-zhi",
+      "title": "训练过程可视化：value.log日志解析与损失/奖励曲线绘制",
+      "file": "25-xun-lian-guo-cheng-ke-shi-hua-value-logri-zhi-jie-xi-yu-sun-shi-jiang-li-qu-xian-hui-zhi.md",
+      "section": "测试与监控",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "26-mo-xing-duan-dian-xu-xun-ji-yu-valueyu-rewardde-zi-dong-jian-cha-dian-sou-suo",
+      "title": "模型断点续训：基于value与reward的自动检查点搜索",
+      "file": "26-mo-xing-duan-dian-xu-xun-ji-yu-valueyu-rewardde-zi-dong-jian-cha-dian-sou-suo.md",
+      "section": "测试与监控",
+      "level": "Beginner"
+    },
+    {
+      "slug": "27-jian-cha-dian-wen-jian-jie-gou-mo-xing-can-shu-jiao-lian-ming-cheng-yu-wang-luo-lei-de-xu-lie-hua-yue-ding",
+      "title": "检查点文件结构：模型参数、教练名称与网络类的序列化约定",
+      "file": "27-jian-cha-dian-wen-jian-jie-gou-mo-xing-can-shu-jiao-lian-ming-cheng-yu-wang-luo-lei-de-xu-lie-hua-yue-ding.md",
+      "section": "测试与监控",
+      "level": "Intermediate"
+    }
+  ]
+}

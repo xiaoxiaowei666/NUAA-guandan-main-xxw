@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(D:/conda_envs/egg/python.exe -c ' *)",
+      "Bash(D:/conda_envs/egg/python.exe -c \"import sys; sys.path.insert\\(0,'.'\\); print\\([p for p in sys.path if 'NUAA' in p or 'clients' in p]\\)\")",
+      "Bash(D:/conda_envs/egg/python.exe clients/selfplay_opponent.py \"model/selfplay_checkpoints/learner_train4.pth\" 2 --host 127.0.0.1 --port 23457 --epsilon 0.0)",
+      "Bash(D:/conda_envs/egg/python.exe -u clients/selfplay_opponent.py \"model/selfplay_checkpoints/learner_train4.pth\" 2 --host 127.0.0.1 --port 23459 --epsilon 0.0)",
+      "Bash(kill %1)",
+      "Bash(./simulator/windows/server.exe -h)",
+      "Bash(./simulator/windows/server.exe --help)",
+      "Bash(D:/conda_envs/egg/python.exe clients/selfplay_opponent.py 2 --port 23457)"
+    ]
+  }
+}
