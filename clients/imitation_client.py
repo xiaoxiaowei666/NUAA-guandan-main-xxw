@@ -673,12 +673,18 @@ class MLPAction(object):
 
     # ---------- 数据收集 ----------
     def add_to_dataset(self, msg, expert_index):
+        # PASS 过滤：可选少则跳过；多选时专家选PASS仅10%概率加入
+        if msg["indexRange"] <= 1:
+            return
+        if msg["actionList"][expert_index][0] == 'PASS' and random.random() > 0.1:
+            return
+
         state_tensor = StateCatEmbedding(msg).cpu()
         action_embeddings = [
             encode_card(process_card_list(msg["actionList"][i])).flatten().cpu()
             for i in range(len(msg["actionList"]))
         ]
-        hist_actions = [list(a) for a in self.history_action]  # 深拷贝
+        hist_actions = [list(a) for a in self.history_action]
         self.dataset.append((state_tensor, action_embeddings, hist_actions, expert_index))
         if len(self.dataset) > self.max_dataset_size:
             self.dataset.pop(0)

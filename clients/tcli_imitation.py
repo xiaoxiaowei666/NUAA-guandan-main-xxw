@@ -28,9 +28,18 @@ from ws4py.client.threadedclient import WebSocketClient
 from colorama import Back, Style
 
 sys.path.append(os.path.abspath('.'))
-from state import State
+from state import State as DefaultState
 from util import *
 from model import ActionValueNet
+
+
+def _load_coach_state(expert_name):
+    """尝试加载教练专用的 State 类，失败则返回默认 State。"""
+    try:
+        mod = importlib.import_module(f"coach.{expert_name}.state")
+        return getattr(mod, "State", DefaultState)
+    except Exception:
+        return DefaultState
 
 
 class ImitationAction:
@@ -85,6 +94,12 @@ class ImitationAction:
 
     def add_to_buffer(self, msg, expert_idx):
         """将当前状态、历史、动作嵌入及专家索引加入缓冲（转为numpy以备发送）"""
+        # PASS 过滤：可选少则跳过；多选时专家选PASS仅10%概率加入
+        if msg["indexRange"] <= 1:
+            return
+        if msg["actionList"][expert_idx][0] == 'PASS' and random.random() > 0.3:
+            return
+
         state_tensor = StateCatEmbedding(msg).cpu()
         history_tensor = self.MapHistoryToLSTM().cpu().float()
         action_embs = [
@@ -158,7 +173,8 @@ class ImitationDistClient(WebSocketClient):
     def __init__(self, url, args):
         super().__init__(url)
         self.args = args
-        self.state = State(args.render)
+        CoachState = _load_coach_state(args.expert)
+        self.state = CoachState(args.render)
         self.render = args.render
         self.episode = 0
 

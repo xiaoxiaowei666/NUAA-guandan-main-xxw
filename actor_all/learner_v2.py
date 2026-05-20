@@ -40,7 +40,7 @@ class LearnerV2GUI:
         self.lr = tk.DoubleVar(value=25e-4)
         self.gamma = tk.DoubleVar(value=0.98)
         self.target_update_freq = tk.IntVar(value=100)
-        self.replay_capacity = tk.IntVar(value=20000)
+        self.replay_capacity = tk.IntVar(value=8000)
         self.batch_size = tk.IntVar(value=512)
         self.save_interval = tk.IntVar(value=25)       # V2: 默认 25 步
         self.log_interval = tk.IntVar(value=1)

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-自博弈启动脚本 — 1 桌 TOP 强对手 + 3 桌自博弈旧模型对手。
+自博弈启动脚本 — 2 桌 TOP 强对手 + 2 桌自博弈旧模型对手。
 不启动游戏服务器，只连接已有端口（服务器由 Docker 管理）。
 模型池每 60 秒自动扫描，新 checkpoint 出现后自动重启对手。
 """
@@ -32,8 +32,8 @@ def start_process(script, *args, extra_args=None):
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     return subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         creationflags=creationflags,
         cwd=PROJECT_ROOT,
         encoding="utf-8",
@@ -104,24 +104,25 @@ def main():
     print("  等待 3 秒后启动对手...")
     time.sleep(3)
 
-    # ---- 2. 桌子 1: TOP 强对手 ----
-    print("\n[2/3] 启动桌子 1 的 TOP 对手...")
-    port1 = TABLES[0]
-    for seat in (2, 3, 4):
-        label = f"TOP (port {port1}, seat {seat})"
-        proc = start_top_opponent(port1, seat)
-        all_procs.append(proc)
-        all_labels.append(label)
-        print(f" {label}")
+    # ---- 2. 桌子 1-2: TOP 强对手 ----
+    print("\n[2/3] 启动桌子 1-2 的 TOP 对手...")
+    top_tables = TABLES[:2]
+    for port in top_tables:
+        for seat in (2, 3, 4):
+            label = f"TOP (port {port}, seat {seat})"
+            proc = start_top_opponent(port, seat)
+            all_procs.append(proc)
+            all_labels.append(label)
+            print(f"  {label}")
 
-    # ---- 3. 桌子 2-4: 自博弈对手（自动从 model/selfplay_checkpoints 热加载） ----
-    print("\n[3/3] 启动桌子 2-4 的自博弈对手...")
+    # ---- 3. 桌子 3-4: 自博弈对手（自动从 model/selfplay_checkpoints 热加载） ----
+    print("\n[3/3] 启动桌子 3-4 的自博弈对手...")
     saved_models = get_saved_models()
     print(f"  模型池: {len(saved_models)} 个 checkpoint")
 
-    sp_tables = TABLES[1:]
+    sp_tables = TABLES[2:]
     for i, table_port in enumerate(sp_tables):
-        model_index = i  # 桌 2 用最新, 桌 3 用第二新, 桌 4 用第三新
+        model_index = i  # 桌 3 用最新, 桌 4 用第二新
         if not saved_models:
             print(f"  ⚠️ Table {table_port}: 模型池为空，跳过（等待 Learner V2 产生 checkpoint）")
             continue
@@ -135,8 +136,8 @@ def main():
 
     print("\n" + "=" * 60)
     print("全部启动完毕！")
-    print(f"  桌子 1 ({TABLES[0]}): RL + 3 TOP (强对抗)")
-    print(f"  桌子 2-4: RL + 3 SelfPlay (每局自动从 model/selfplay_checkpoints 热加载)")
+    print(f"  桌子 1-2 ({TABLES[0]}, {TABLES[1]}): RL + 3 TOP (强对抗)")
+    print(f"  桌子 3-4 ({TABLES[2]}, {TABLES[3]}): RL + 3 SelfPlay (每局自动从 model/selfplay_checkpoints 热加载)")
     print("  按 Ctrl+C 终止所有进程")
     print("=" * 60)
 

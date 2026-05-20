@@ -164,6 +164,12 @@ class ImitationAction:
         return ret
 
     def add_to_dataset(self, msg, expert_idx):
+        # PASS 过滤：可选少则跳过；多选时专家选PASS仅10%概率加入
+        if msg["indexRange"] <= 1:
+            return
+        if msg["actionList"][expert_idx][0] == 'PASS' and random.random() > 0.1:
+            return
+
         state = StateCatEmbedding(msg).cpu()
         action_embs = [encode_card(process_card_list(msg["actionList"][i])).flatten().cpu()
                        for i in range(len(msg["actionList"]))]
