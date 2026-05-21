@@ -24,7 +24,7 @@ from colorama import Back, Style
 
 sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
-from coach.TOP.safety_filter import compute_safety_mask
+from coach.TOP.safety_filter import compute_safety_mask, compute_strategy_bonus
 from state import State
 from util import *
 from model import ActionValueNet
@@ -371,7 +371,6 @@ class ReinforcementAction:
         self.last_obs = None
         self.last_history = None
         self.last_act = None
-        self.last_phi = None          # 势能塑形奖励
 
         # 加载或创建网络
         if args.model and args.model != "None":
@@ -402,69 +401,44 @@ class ReinforcementAction:
         self.last_obs = None
         self.last_history = None
         self.last_act = None
-        self.last_phi = None
         self.history_action = [['PASS', 'PASS', 'PASS']]
 
-    # ---------- 势能塑形奖励 ----------
-    GAMMA_SHAPING = 0.98
-
-    def compute_potential(self, msg):
-        """
-        Φ(s): 态势评估函数。
-        利用 publicInfo（队友/对手剩余牌）、greaterPos（控场权）等完整状态信息。
-        myPos 由 ReinforcementClient.received_message 通过 setdefault 注入 msg。
-        """
-        my_pos = msg['myPos']  # 调用方保证已注入
-        teammate_pos = (my_pos + 2) % 4
-        hand_cards = msg.get('handCards', [])
-        public_info = msg.get('publicInfo', [])
-
-        phi = 0.0
-
-        # 自己手牌进度
-        phi -= len(hand_cards) * 0.06
-
-        # 队友手牌进度
-        if public_info and teammate_pos < len(public_info):
-            teammate_rest = public_info[teammate_pos].get('rest', len(hand_cards))
-            phi -= teammate_rest * 0.03
-
-        # 对手手牌进度
-        if public_info:
-            for i in range(4):
-                if i != my_pos and i != teammate_pos and i < len(public_info):
-                    opp_rest = public_info[i].get('rest', 27)
-                    phi += opp_rest * 0.02
-
-        # 控场权
-        greater_pos = self._get_greater_pos(msg)
-        if greater_pos >= 0:
-            if greater_pos == my_pos or greater_pos == teammate_pos:
-                phi += 0.1
-            else:
-                phi -= 0.1
-
-        return phi
-
-    @staticmethod
-    def _get_greater_pos(msg):
-        gp = msg.get('greaterPos', -1)
-        ga = msg.get('greaterAction', -1)
-        if isinstance(gp, int) and 0 <= gp <= 3:
-            return gp
-        if isinstance(ga, int) and 0 <= ga <= 3:
-            return ga
-        return -1
-
     PASS_PENALTY = 0.05
+    RETRO_ALPHA = 0.5      # 复盘时信任模型自身的比例
+
+    def compute_max_q(self, obs, history, action_list):
+        """模型对自己状态的估值：可选动作中最大的 Q 值"""
+        if not action_list:
+            return 0.0
+        device = self.args.device
+        obs = obs.float().to(device)
+        history = history.float().to(device)
+        inps = []
+        for act_entry in action_list:
+            act_emb = encode_card(process_card_list(act_entry)).flatten().to(device)
+            inps.append(torch.cat((obs.flatten(), act_emb)))
+        batched_inp = torch.stack(inps, dim=0)
+        batched_hist = history.expand(len(inps), -1, -1)
+        with torch.no_grad():
+            qs = self.ValueNet(batched_inp, batched_hist).squeeze(-1)
+        return qs.max().item()
 
     def apply_final_reward(self, final_reward):
-        """MC 模式：每一步直接吃终局奖励 + 势能塑形奖励，全部 done=True"""
+        """复盘式信贷分配：终局信号打底，模型 Q 负责差异化"""
         if not self.episode_transitions:
             return
-        for i, trans in enumerate(self.episode_transitions):
-            t = list(trans)
-            t[3] = t[3] + final_reward - (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
+        n = len(self.episode_transitions)
+        alpha = self.RETRO_ALPHA
+
+        for i in range(n - 1, -1, -1):
+            t = list(self.episode_transitions[i])
+            if i == n - 1:
+                target = final_reward
+            else:
+                model_q = self.compute_max_q(t[4], t[6], t[5])
+                target = (1 - alpha) * final_reward + alpha * model_q
+            target -= (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
+            t[3] = target
             t[7] = True
             self.replay_memory.append(tuple(t))
 
@@ -499,41 +473,49 @@ class ReinforcementAction:
                 q = self.ValueNet(inp, history).sum().item()
                 q_vals.append(q)
 
-        # ---- TOP 结构安全过滤 ----
+        # ---- TOP 结构安全过滤 + 策略引导 ----
         safety_mask = compute_safety_mask(msg, self.action, msg['myPos'])
+        strategy_bonus = compute_strategy_bonus(msg, self.action, msg['myPos'])
 
         if random.random() > self.args.epsilon:
-            # Greedy: 安全候选里选最优非 PASS
-            safe_non_pass = [i for i in range(self.act_range + 1)
-                             if safety_mask[i] and i != pass_idx]
-            if not safe_non_pass and self.act_range > 0:
-                safe_non_pass = [i for i in range(self.act_range + 1) if i != pass_idx]
-            if safe_non_pass:
-                action_idx = max(safe_non_pass, key=lambda i: q_vals[i])
-            else:
+            # Greedy: 安全候选 + 策略加分，选最优
+            best_score = -float('inf')
+            action_idx = 0
+            for i in range(self.act_range + 1):
+                if not safety_mask[i]:
+                    continue
+                if i == pass_idx and self.act_range > 0:
+                    continue
+                score = q_vals[i] + strategy_bonus[i]
+                if score > best_score:
+                    best_score = score
+                    action_idx = i
+            if best_score == -float('inf'):
+                best_score = -float('inf')
+                for i in range(self.act_range + 1):
+                    if i == pass_idx and self.act_range > 0:
+                        continue
+                    if q_vals[i] > best_score:
+                        best_score = q_vals[i]
+                        action_idx = i
+            if best_score == -float('inf'):
                 action_idx = int(np.argmax(q_vals))
         else:
-            # Exploration: 只在安全候选里随机选
+            # Exploration: 安全候选里随机选
             safe_indices = [i for i in range(self.act_range + 1) if safety_mask[i]]
             if not safe_indices:
                 safe_indices = list(range(self.act_range + 1))
             action_idx = random.choice(safe_indices)
 
-        # ---------- 后续原有逻辑不变 ----------
         act = process_card_list(self.action[action_idx])
 
-        # 势能塑形奖励
-        phi_curr = self.compute_potential(msg)
-
+        # 记录经验（reward 由 apply_final_reward 复盘后填入）
         if self.last_obs is not None and self.last_history is not None:
-            shaping_r = 0.0
-            if self.last_phi is not None:
-                shaping_r = self.GAMMA_SHAPING * phi_curr - self.last_phi
             transition = (
                 self.last_obs.cpu(),
                 self.last_history.cpu(),
                 self.last_act,
-                shaping_r,
+                0.0,
                 state.cpu(),
                 self.action,
                 history.cpu(),
@@ -544,7 +526,6 @@ class ReinforcementAction:
         self.last_obs = state
         self.last_history = history
         self.last_act = act
-        self.last_phi = phi_curr
         self.history_action.append(process_card_list(msg["actionList"][action_idx]))
         return action_idx
 

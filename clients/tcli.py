@@ -24,7 +24,7 @@ from ws4py.client.threadedclient import WebSocketClient
 # 注意导入路径：根据你的项目结构，可能需调整
 sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
-from coach.TOP.safety_filter import compute_safety_mask
+from coach.TOP.safety_filter import compute_safety_mask, compute_strategy_bonus
 from state import State
 from util import *
 from model import ActionValueNet
@@ -78,7 +78,6 @@ class InferenceClient(BaseClient):
         self.last_history = None
         self.last_act = None
         self.last_action_list = None
-        self.last_phi = None          # 上一步状态势能，用于势能塑形奖励
 
         # ZMQ SUB：被动接收 Learner 广播的权重
         self.zmq_ctx = zmq.Context()
@@ -126,59 +125,6 @@ class InferenceClient(BaseClient):
         reward_map = {(0,1):5, (0,2):3, (0,3):1, (1,2):-1, (1,3):-3, (2,3):-5}
         return reward_map.get((myRank, friendRank), 0)
 
-    # ---------- 势能塑形奖励 ----------
-    GAMMA_SHAPING = 0.98  # 与 Learner 端 gamma 保持一致
-
-    def compute_potential(self, msg):
-        """
-        Φ(s): 态势评估函数。
-        利用 publicInfo（队友/对手剩余牌）、greaterPos（控场权）等完整状态信息。
-        越高 = 局势越有利。
-        """
-        my_pos = self.state._myPos      # 从 State 对象取，beginning 阶段已解析
-        teammate_pos = (my_pos + 2) % 4
-        hand_cards = msg.get('handCards', [])
-        public_info = msg.get('publicInfo', [])
-
-        phi = 0.0
-
-        # 1. 自己手牌进度：剩得越少越好
-        phi -= len(hand_cards) * 0.06
-
-        # 2. 队友手牌进度：队友剩得越少越好（权重为自己的一半）
-        if public_info and teammate_pos < len(public_info):
-            teammate_rest = public_info[teammate_pos].get('rest', len(hand_cards))
-            phi -= teammate_rest * 0.03
-
-        # 3. 对手手牌进度：对手剩得多对我们有利
-        if public_info:
-            for i in range(4):
-                if i != my_pos and i != teammate_pos and i < len(public_info):
-                    opp_rest = public_info[i].get('rest', 27)
-                    phi += opp_rest * 0.02
-
-        # 4. 控场权：我方或队友控场优于对手控场
-        greater_pos = self._get_greater_pos(msg)
-        if greater_pos >= 0:
-            if greater_pos == my_pos or greater_pos == teammate_pos:
-                phi += 0.1   # 我方控场
-            else:
-                phi -= 0.1   # 对手控场
-        # greaterPos == -1：自由出牌 / 进贡 / 还贡，不加不减
-
-        return phi
-
-    @staticmethod
-    def _get_greater_pos(msg):
-        """从消息中提取当前最大牌的出牌者位置"""
-        gp = msg.get('greaterPos', -1)
-        ga = msg.get('greaterAction', -1)
-        if isinstance(gp, int) and 0 <= gp <= 3:
-            return gp
-        if isinstance(ga, int) and 0 <= ga <= 3:
-            return ga
-        return -1
-
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
@@ -190,7 +136,6 @@ class InferenceClient(BaseClient):
             self.last_history = None
             self.last_act = None
             self.last_action_list = None
-            self.last_phi = None
             self.history_action = [['PASS', 'PASS', 'PASS']]
             self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
@@ -204,7 +149,6 @@ class InferenceClient(BaseClient):
             self.last_obs = None
             self.last_history = None
             self.last_act = None
-            self.last_phi = None
 
         # 收到 notify/play 时累计已出牌统计（别人出牌）
         if msg.get("type") == "notify" and msg.get("stage") == "play":
@@ -246,22 +190,36 @@ class InferenceClient(BaseClient):
                 q = self.model(inp, history).sum().item()
                 q_vals.append(q)
 
-        # ---- TOP 结构安全过滤 ----
+        # ---- TOP 结构安全过滤 + 策略引导 ----
         safety_mask = compute_safety_mask(msg, action_list, self.state._myPos)
+        strategy_bonus = compute_strategy_bonus(msg, action_list, self.state._myPos)
 
         if random.random() > self.args.epsilon:
-            # Greedy: 在安全候选里选最优，同时禁止 PASS 崩塌
-            safe_non_pass = [i for i in range(act_range + 1)
-                             if safety_mask[i] and i != pass_idx]
-            # 如果所有非 PASS 都被过滤了，回退到不过滤
-            if not safe_non_pass and act_range > 0:
-                safe_non_pass = [i for i in range(act_range + 1) if i != pass_idx]
-            if safe_non_pass:
-                action_idx = max(safe_non_pass, key=lambda i: q_vals[i])
-            else:
+            # Greedy: 安全候选 + 策略加分，选最优
+            best_score = -float('inf')
+            action_idx = 0
+            for i in range(act_range + 1):
+                if not safety_mask[i]:
+                    continue  # 不安全，跳过
+                if i == pass_idx and act_range > 0:
+                    continue  # 有得选时不 PASS
+                score = q_vals[i] + strategy_bonus[i]
+                if score > best_score:
+                    best_score = score
+                    action_idx = i
+            # 如果全被过滤了，回退到只看 Q 值
+            if best_score == -float('inf'):
+                best_score = -float('inf')
+                for i in range(act_range + 1):
+                    if i == pass_idx and act_range > 0:
+                        continue
+                    if q_vals[i] > best_score:
+                        best_score = q_vals[i]
+                        action_idx = i
+            if best_score == -float('inf'):
                 action_idx = int(np.argmax(q_vals))
         else:
-            # Exploration: 只在安全候选里随机选
+            # Exploration: 安全候选里用 Q+bonus 做 softmax 采样
             safe_indices = [i for i in range(act_range + 1) if safety_mask[i]]
             if not safe_indices:
                 safe_indices = list(range(act_range + 1))
@@ -269,19 +227,13 @@ class InferenceClient(BaseClient):
 
         act = process_card_list(action_list[action_idx])
 
-        # 势能塑形奖励: F(s,s') = γΦ(s') - Φ(s)
-        phi_curr = self.compute_potential(msg)
-
-        # 记录经验
+        # 记录经验（reward 由 apply_final_reward 复盘后填入）
         if self.last_obs is not None and self.last_history is not None:
-            shaping_r = 0.0
-            if self.last_phi is not None:
-                shaping_r = self.GAMMA_SHAPING * phi_curr - self.last_phi
             transition = (
                 self.last_obs.cpu(),
                 self.last_history.cpu(),
                 self.last_act,
-                shaping_r,
+                0.0,           # 复盘时覆盖
                 state.cpu(),
                 action_list,
                 history.cpu(),
@@ -293,20 +245,48 @@ class InferenceClient(BaseClient):
         self.last_history = history
         self.last_act = act
         self.last_action_list = action_list
-        self.last_phi = phi_curr
         self.history_action.append(act)
 
         return action_idx
 
     PASS_PENALTY = 0.05  # PASS 动作的微小惩罚
+    RETRO_ALPHA = 0.5     # 复盘时信任模型自身的比例 (0=纯MC, 1=纯TD)
+
+    def compute_max_q(self, obs, history, action_list):
+        """模型对自己状态的估值：可选动作中最大的 Q 值"""
+        if not action_list:
+            return 0.0
+        obs = obs.float().to(self.device)
+        history = history.float().to(self.device)
+        inps = []
+        for act_entry in action_list:
+            act_emb = encode_card(process_card_list(act_entry)).flatten().to(self.device)
+            inps.append(torch.cat((obs.flatten(), act_emb)))
+        batched_inp = torch.stack(inps, dim=0)
+        batched_hist = history.expand(len(inps), -1, -1)
+        with torch.no_grad():
+            qs = self.model(batched_inp, batched_hist).squeeze(-1)
+        return qs.max().item()
 
     def apply_final_reward(self, final_reward):
-        """MC 模式：每一步直接吃终局奖励 + 势能塑形奖励，全部 done=True"""
+        """复盘式信贷分配：终局信号直接打底，模型 Q 负责差异化"""
         if not self.episode_transitions:
             return
-        for i, trans in enumerate(self.episode_transitions):
-            t = list(trans)
-            t[3] = t[3] + final_reward - (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
+        n = len(self.episode_transitions)
+        alpha = self.RETRO_ALPHA  # 信模型的比例
+
+        for i in range(n - 1, -1, -1):
+            t = list(self.episode_transitions[i])
+            if i == n - 1:
+                # 最后一步：纯终局信号
+                target = final_reward
+            else:
+                # 模型自己评估「做完这一步之后局面有多好」
+                model_q = self.compute_max_q(t[4], t[6], t[5])
+                # 终局信号打底(保底) + 模型 Q 做差异化
+                target = (1 - alpha) * final_reward + alpha * model_q
+            target -= (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
+            t[3] = target
             t[7] = True
             self.episode_transitions[i] = tuple(t)
 
