@@ -39,6 +39,7 @@ class LearnerV2GUI:
         self.device = tk.StringVar(value="cuda")
         self.lr = tk.DoubleVar(value=25e-4)
         self.gamma = tk.DoubleVar(value=0.98)
+        self.n_step = tk.IntVar(value=3)                  # TD(n) 步数
         self.target_update_freq = tk.IntVar(value=100)
         self.replay_capacity = tk.IntVar(value=8000)
         self.batch_size = tk.IntVar(value=512)
@@ -76,6 +77,7 @@ class LearnerV2GUI:
         self.save_interval_val = None
         self.device_val = None
         self.gamma_val = None
+        self.n_step_val = None
         self.target_update_freq_val = None
 
         self.build_ui()
@@ -119,6 +121,10 @@ class LearnerV2GUI:
 
         ttk.Label(param_frame, text="Gamma (TD):").grid(row=row, column=0, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.gamma, width=10).grid(row=row, column=1, padx=5, sticky=tk.W)
+
+        ttk.Label(param_frame, text="TD步数 (n):").grid(row=row, column=2, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.n_step, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
+        row += 1
 
         ttk.Label(param_frame, text="Target同步频率:").grid(row=row, column=2, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.target_update_freq, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
@@ -202,6 +208,7 @@ class LearnerV2GUI:
         try:
             lr = self.lr.get()
             gamma = self.gamma.get()
+            n_step = self.n_step.get()
             target_update_freq = self.target_update_freq.get()
             batch_size = self.batch_size.get()
             replay_capacity = self.replay_capacity.get()
@@ -220,6 +227,7 @@ class LearnerV2GUI:
         self.save_interval_val = save_interval
         self.device_val = device
         self.gamma_val = gamma
+        self.n_step_val = n_step
         self.target_update_freq_val = target_update_freq
 
         if self.use_none.get():
@@ -395,6 +403,7 @@ class LearnerV2GUI:
         self.optimizer.zero_grad()
         device = self.device_val
         gamma = self.gamma_val
+        gamma_n = gamma ** self.n_step_val  # TD(n) bootstrap 折扣
 
         for obs, history, act, reward, obs_next, actionListNext, history_next, done in batch:
             obs = obs.float().to(device)
@@ -426,7 +435,7 @@ class LearnerV2GUI:
                     else:
                         online_qs_masked = online_qs.masked_fill(pass_mask_t, float('-inf'))
                         best_idx = online_qs_masked.argmax().item()
-                        td_target = reward + gamma * target_qs[best_idx].item()
+                        td_target = reward + gamma_n * target_qs[best_idx].item()
 
             target = torch.tensor(td_target, dtype=torch.float32, device=device)
             loss = torch.nn.functional.mse_loss(q_curr, target)
