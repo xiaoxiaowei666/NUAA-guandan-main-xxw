@@ -24,7 +24,8 @@ from colorama import Back, Style
 
 sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
-from coach.TOP.safety_filter import compute_safety_mask, compute_strategy_bonus
+from coach.TOP.candidate_filter import compute_candidate_list
+from coach.TOP.action import Action as TOPAction
 from state import State
 from util import *
 from model import ActionValueNet
@@ -366,6 +367,9 @@ class ReinforcementAction:
         self.history_action = [['PASS', 'PASS', 'PASS']]
         self.replay_memory = MemoryBuffer(capacity=args.replay_capacity)
 
+        # TOP 专家（辅助决策）
+        self.top_expert = TOPAction(render=False)
+
         # 本局暂存
         self.episode_transitions = []
         self.last_obs = None
@@ -453,59 +457,53 @@ class ReinforcementAction:
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
 
-        # 找到 PASS 的索引（PASS 动作列表第一个元素是 'PASS'）
         pass_idx = None
         for i, act in enumerate(self.action):
             if act[0] == 'PASS':
                 pass_idx = i
                 break
 
-        # -------- 原有的 ε-贪婪 + Q 值计算 --------
+        # 1. TOP 专家意见
+        try:
+            top_idx = self.top_expert.parse_AI(msg, msg.get('myPos', 0))
+            top_idx = min(top_idx, self.act_range)
+        except Exception:
+            top_idx = -1
+
+        # 2. V6 候选过滤（TOP VIP 通道）
+        try:
+            candidates = compute_candidate_list(
+                msg, self.action, msg['myPos'], top_idx=top_idx
+            )
+        except Exception:
+            candidates = list(range(self.act_range + 1))
+
+        # 3. 只算候选的 Q 值
         state = StateCatEmbedding(msg)
         history = self.MapHistoryToLSTM().float().to(self.args.device)
-
-        # 无论是贪婪还是探索，我们都把 Q 值算出来，方便后续干预
-        q_vals = []
+        q_vals = [float('-inf')] * (self.act_range + 1)
         with torch.no_grad():
-            for i in range(self.act_range + 1):
+            for i in candidates:
                 act_emb = ActionEmbedding(msg, i).to(self.args.device)
                 inp = torch.cat((state.flatten().to(self.args.device), act_emb)).unsqueeze(0)
-                q = self.ValueNet(inp, history).sum().item()
-                q_vals.append(q)
+                q_vals[i] = self.ValueNet(inp, history).sum().item()
 
-        # ---- TOP 结构安全过滤 + 策略引导 ----
-        safety_mask = compute_safety_mask(msg, self.action, msg['myPos'])
-        strategy_bonus = compute_strategy_bonus(msg, self.action, msg['myPos'])
-
+        # 4. 决策
         if random.random() > self.args.epsilon:
-            # Greedy: 安全候选 + 策略加分，选最优
             best_score = -float('inf')
-            action_idx = 0
-            for i in range(self.act_range + 1):
-                if not safety_mask[i]:
+            action_idx = candidates[0]
+            for i in candidates:
+                if i == pass_idx and len(candidates) > 1:
                     continue
-                if i == pass_idx and self.act_range > 0:
-                    continue
-                score = q_vals[i] + strategy_bonus[i]
+                score = q_vals[i] + (0.3 if i == top_idx else 0.0)
                 if score > best_score:
                     best_score = score
                     action_idx = i
             if best_score == -float('inf'):
-                best_score = -float('inf')
-                for i in range(self.act_range + 1):
-                    if i == pass_idx and self.act_range > 0:
-                        continue
-                    if q_vals[i] > best_score:
-                        best_score = q_vals[i]
-                        action_idx = i
-            if best_score == -float('inf'):
-                action_idx = int(np.argmax(q_vals))
+                action_idx = int(np.argmax([q_vals[i] if q_vals[i] != float('-inf') else -float('inf') for i in range(self.act_range + 1)]))
         else:
-            # Exploration: 安全候选里随机选
-            safe_indices = [i for i in range(self.act_range + 1) if safety_mask[i]]
-            if not safe_indices:
-                safe_indices = list(range(self.act_range + 1))
-            action_idx = random.choice(safe_indices)
+            non_pass = [i for i in candidates if i != pass_idx]
+            action_idx = random.choice(non_pass) if non_pass else 0
 
         act = process_card_list(self.action[action_idx])
 
@@ -604,15 +602,32 @@ class TestAction:
     def parse(self, msg, render=True):
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
+
+        # V6 候选过滤（测试模式，无 TOP 专家）
+        try:
+            candidates = compute_candidate_list(msg, self.action, msg['myPos'], top_idx=-1)
+        except Exception:
+            candidates = list(range(self.act_range + 1))
+
+        # 只算候选的 Q 值
         state = StateCatEmbedding(msg)
         history = self.MapHistoryToLSTM().float().to(self.args.device)
-        q_vals = []
-        for i in range(self.act_range + 1):
+        q_vals = [float('-inf')] * (self.act_range + 1)
+        for i in candidates:
             act_emb = ActionEmbedding(msg, i)
             inp = torch.cat((state.flatten(), act_emb.flatten()), dim=0).unsqueeze(0).to(self.args.device)
-            q = self.ValueNet(inp, history).sum().item()
-            q_vals.append(q)
-        index = np.argmax(q_vals).item()
+            q_vals[i] = self.ValueNet(inp, history).sum().item()
+
+        # 候选内选最优
+        best_score = -float('inf')
+        index = candidates[0]
+        for i in candidates:
+            if q_vals[i] > best_score:
+                best_score = q_vals[i]
+                index = i
+        if best_score == -float('inf'):
+            index = int(np.argmax([q_vals[i] if q_vals[i] != float('-inf') else -float('inf') for i in range(self.act_range + 1)]))
+
         self.history_action.append(process_card_list(msg["actionList"][index]))
         return index
 

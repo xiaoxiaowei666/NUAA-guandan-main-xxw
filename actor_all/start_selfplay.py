@@ -34,6 +34,7 @@ def start_process(script, *args, extra_args=None):
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # 临时改一下，看具体报错
         creationflags=creationflags,
         cwd=PROJECT_ROOT,
         encoding="utf-8",

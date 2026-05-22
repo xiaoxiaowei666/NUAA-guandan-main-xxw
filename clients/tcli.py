@@ -24,8 +24,9 @@ from ws4py.client.threadedclient import WebSocketClient
 # 注意导入路径：根据你的项目结构，可能需调整
 sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
-from coach.TOP.safety_filter import compute_safety_mask, compute_strategy_bonus
-from state import State
+from coach.TOP.state import State
+from coach.TOP.candidate_filter import compute_candidate_list
+from coach.TOP.action import Action as TOPAction
 from util import *
 from model import ActionValueNet
 
@@ -68,6 +69,9 @@ class InferenceClient(BaseClient):
         # 定义模型（由 Learner 更新权重）
         self.model = ActionValueNet().to(self.device)
         self.model.eval()
+
+        # TOP 专家（辅助决策）
+        self.top_expert = TOPAction(render=False)
 
         self.history_action = [['PASS', 'PASS', 'PASS']]
         self.episode = 0
@@ -179,51 +183,55 @@ class InferenceClient(BaseClient):
                 pass_idx = i
                 break
 
+        # 1. TOP 专家意见（先问专家）
+        try:
+            top_idx = self.top_expert.parse_AI(msg, self.state._myPos, self.state)
+            top_idx = min(top_idx, act_range)
+        except Exception:
+            top_idx = -1
+
+        # 2. V6 候选过滤（传入 TOP 推荐，享受 VIP 通道）
+        try:
+            candidates = compute_candidate_list(
+                msg, action_list, self.state._myPos, self.state, top_idx=top_idx
+            )
+        except Exception:
+            import traceback
+            with open("filter_error.log", "a", encoding="utf-8") as f:
+                f.write(f"[{time.ctime()}] filter crash\n")
+                traceback.print_exc(file=f)
+            candidates = list(range(act_range + 1))
+
+        # 3. 只算候选动作的 Q 值（性能优化）
         state = StateCatEmbedding(msg).to(self.device)
         history = self.MapHistoryToLSTM().float().to(self.device)
-
-        q_vals = []
+        q_vals = [float('-inf')] * (act_range + 1)
         with torch.no_grad():
-            for i in range(act_range + 1):
+            for i in candidates:
                 act_emb = ActionEmbedding(msg, i).to(self.device)
                 inp = torch.cat((state.flatten(), act_emb)).unsqueeze(0)
-                q = self.model(inp, history).sum().item()
-                q_vals.append(q)
+                q_vals[i] = self.model(inp, history).sum().item()
 
-        # ---- TOP 结构安全过滤 + 策略引导 ----
-        safety_mask = compute_safety_mask(msg, action_list, self.state._myPos)
-        strategy_bonus = compute_strategy_bonus(msg, action_list, self.state._myPos)
+        # 4. 决策
+        top_bonus = getattr(self.args, 'top_bonus', 0.3)
 
         if random.random() > self.args.epsilon:
-            # Greedy: 安全候选 + 策略加分，选最优
+            # Greedy: 候选内 Q + TOP 加成选最优
             best_score = -float('inf')
-            action_idx = 0
-            for i in range(act_range + 1):
-                if not safety_mask[i]:
-                    continue  # 不安全，跳过
-                if i == pass_idx and act_range > 0:
-                    continue  # 有得选时不 PASS
-                score = q_vals[i] + strategy_bonus[i]
+            action_idx = candidates[0]
+            for i in candidates:
+                if i == pass_idx and len(candidates) > 1:
+                    continue
+                score = q_vals[i] + (top_bonus if i == top_idx else 0.0)
                 if score > best_score:
                     best_score = score
                     action_idx = i
-            # 如果全被过滤了，回退到只看 Q 值
             if best_score == -float('inf'):
-                best_score = -float('inf')
-                for i in range(act_range + 1):
-                    if i == pass_idx and act_range > 0:
-                        continue
-                    if q_vals[i] > best_score:
-                        best_score = q_vals[i]
-                        action_idx = i
-            if best_score == -float('inf'):
-                action_idx = int(np.argmax(q_vals))
+                action_idx = int(np.argmax([q_vals[i] if q_vals[i] != float('-inf') else -float('inf') for i in range(act_range + 1)]))
         else:
-            # Exploration: 安全候选里用 Q+bonus 做 softmax 采样
-            safe_indices = [i for i in range(act_range + 1) if safety_mask[i]]
-            if not safe_indices:
-                safe_indices = list(range(act_range + 1))
-            action_idx = random.choice(safe_indices)
+            # Explore: 候选集内随机探索
+            non_pass = [i for i in candidates if i != pass_idx]
+            action_idx = random.choice(non_pass) if non_pass else 0
 
         act = process_card_list(action_list[action_idx])
 
