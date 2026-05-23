@@ -190,7 +190,7 @@ class InferenceClient(BaseClient):
         except Exception:
             top_idx = -1
 
-        # 2. V6 候选过滤（传入 TOP 推荐，享受 VIP 通道）
+        # 2. V7.1 候选过滤（传入 TOP 推荐，享受 VIP 通道）
         try:
             candidates = compute_candidate_list(
                 msg, action_list, self.state._myPos, self.state, top_idx=top_idx

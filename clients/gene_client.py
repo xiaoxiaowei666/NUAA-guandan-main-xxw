@@ -470,7 +470,7 @@ class ReinforcementAction:
         except Exception:
             top_idx = -1
 
-        # 2. V6 候选过滤（TOP VIP 通道）
+        # 2. V7.1 候选过滤（TOP VIP 通道）
         try:
             candidates = compute_candidate_list(
                 msg, self.action, msg['myPos'], top_idx=top_idx
