@@ -24,7 +24,7 @@ import numpy as np
 
 sys.path.append(os.path.abspath('.'))
 from model import ActionValueNet
-from util import encode_card, now_str, check_path, process_card_list
+from util import encode_card, now_str, check_path
 
 
 class LearnerV2GUI:
@@ -395,17 +395,16 @@ class LearnerV2GUI:
         self.master.after(0, _update)
 
     def train_step(self, batch):
+        """纯 MC：Q(s,a) 直接回归到 reward（Client 端已填入终局奖励）。
+        所有 transition 的 done=True，不做任何 TD bootstrap。"""
         self.model.train()
         total_loss = 0.0
         total_q = 0.0
-        total_target = 0.0
         total_reward = 0.0
         self.optimizer.zero_grad()
         device = self.device_val
-        gamma = self.gamma_val
-        gamma_n = gamma ** self.n_step_val  # TD(n) bootstrap 折扣
 
-        for obs, history, act, reward, obs_next, actionListNext, history_next, done in batch:
+        for obs, history, act, reward, _obs_next, _actionListNext, _history_next, _done in batch:
             obs = obs.float().to(device)
             history = history.float().to(device)
             act_emb = encode_card(act).flatten().to(device)
@@ -413,35 +412,10 @@ class LearnerV2GUI:
             state_curr = torch.cat((obs.flatten(), act_emb)).unsqueeze(0)
             q_curr = self.model(state_curr, history).sum()
 
-            with torch.no_grad():
-                if done or not actionListNext:
-                    td_target = reward
-                else:
-                    obs_next = obs_next.float().to(device)
-                    history_next = history_next.float().to(device)
-                    inps = []
-                    pass_mask = []
-                    for act_entry in actionListNext:
-                        act_emb_next = encode_card(process_card_list(act_entry)).flatten().to(device)
-                        inps.append(torch.cat((obs_next.flatten(), act_emb_next)))
-                        pass_mask.append(act_entry[0] == 'PASS')
-                    batched_inp = torch.stack(inps, dim=0)
-                    batched_hist = history_next.expand(len(inps), -1, -1)
-                    online_qs = self.model(batched_inp, batched_hist).squeeze(-1)
-                    target_qs = self.target_model(batched_inp, batched_hist).squeeze(-1)
-                    pass_mask_t = torch.tensor(pass_mask, device=device)
-                    if pass_mask_t.all():
-                        td_target = reward
-                    else:
-                        online_qs_masked = online_qs.masked_fill(pass_mask_t, float('-inf'))
-                        best_idx = online_qs_masked.argmax().item()
-                        td_target = reward + gamma_n * target_qs[best_idx].item()
-
-            target = torch.tensor(td_target, dtype=torch.float32, device=device)
+            target = torch.tensor(reward, dtype=torch.float32, device=device)
             loss = torch.nn.functional.mse_loss(q_curr, target)
             total_loss += loss
             total_q += q_curr.item()
-            total_target += td_target
             total_reward += reward
 
         n = len(batch)
@@ -450,7 +424,7 @@ class LearnerV2GUI:
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
         self.model.eval()
-        return avg_loss.item(), total_q / n, total_target / n, total_reward / n
+        return avg_loss.item(), total_q / n, total_reward / n, total_reward / n
 
     def broadcast_weights(self):
         if not self.pub_socket:

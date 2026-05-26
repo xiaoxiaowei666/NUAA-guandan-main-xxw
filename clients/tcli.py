@@ -99,6 +99,7 @@ class InferenceClient(BaseClient):
         self.ready_socket.send(b"ready")          # 启动时发送一次
         print("已发送就绪信号至 Learner")
 
+
         # 后台监听权重
         self.weights_lock = threading.Lock()
         self.stop_listener = False
@@ -202,15 +203,22 @@ class InferenceClient(BaseClient):
                 traceback.print_exc(file=f)
             candidates = list(range(act_range + 1))
 
-        # 3. 只算候选动作的 Q 值（性能优化）
+        # 3. Batch 并行计算候选动作的 Q 值
         state = StateCatEmbedding(msg).to(self.device)
         history = self.MapHistoryToLSTM().float().to(self.device)
         q_vals = [float('-inf')] * (act_range + 1)
-        with torch.no_grad():
-            for i in candidates:
-                act_emb = ActionEmbedding(msg, i).to(self.device)
-                inp = torch.cat((state.flatten(), act_emb)).unsqueeze(0)
-                q_vals[i] = self.model(inp, history).sum().item()
+        if candidates:
+            state_flat = state.flatten()
+            act_embs = torch.stack([ActionEmbedding(msg, i).to(self.device) for i in candidates])
+            inp_batch = torch.cat((
+                state_flat.unsqueeze(0).expand(len(candidates), -1),
+                act_embs
+            ), dim=1)
+            hist_batch = history.expand(len(candidates), -1, -1)
+            with torch.no_grad():
+                q_batch = self.model(inp_batch, hist_batch).sum(dim=1)
+            for idx, i in enumerate(candidates):
+                q_vals[i] = q_batch[idx].item()
 
         # 4. 决策
         top_bonus = getattr(self.args, 'top_bonus', 0.3)
@@ -258,42 +266,17 @@ class InferenceClient(BaseClient):
         return action_idx
 
     PASS_PENALTY = 0.05  # PASS 动作的微小惩罚
-    RETRO_ALPHA = 0.5     # 复盘时信任模型自身的比例 (0=纯MC, 1=纯TD)
-
-    def compute_max_q(self, obs, history, action_list):
-        """模型对自己状态的估值：可选动作中最大的 Q 值"""
-        if not action_list:
-            return 0.0
-        obs = obs.float().to(self.device)
-        history = history.float().to(self.device)
-        inps = []
-        for act_entry in action_list:
-            act_emb = encode_card(process_card_list(act_entry)).flatten().to(self.device)
-            inps.append(torch.cat((obs.flatten(), act_emb)))
-        batched_inp = torch.stack(inps, dim=0)
-        batched_hist = history.expand(len(inps), -1, -1)
-        with torch.no_grad():
-            qs = self.model(batched_inp, batched_hist).squeeze(-1)
-        return qs.max().item()
 
     def apply_final_reward(self, final_reward):
-        """复盘式信贷分配：终局信号直接打底，模型 Q 负责差异化"""
+        """纯 MC：整局所有步的目标统一为终局奖励。
+        target = final_reward（加可选的 PASS 微调惩罚）"""
         if not self.episode_transitions:
             return
-        n = len(self.episode_transitions)
-        alpha = self.RETRO_ALPHA  # 信模型的比例
-
-        for i in range(n - 1, -1, -1):
+        for i in range(len(self.episode_transitions)):
             t = list(self.episode_transitions[i])
-            if i == n - 1:
-                # 最后一步：纯终局信号
-                target = final_reward
-            else:
-                # 模型自己评估「做完这一步之后局面有多好」
-                model_q = self.compute_max_q(t[4], t[6], t[5])
-                # 终局信号打底(保底) + 模型 Q 做差异化
-                target = (1 - alpha) * final_reward + alpha * model_q
-            target -= (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
+            target = final_reward
+            if t[2][0] == 'PASS':
+                target -= self.PASS_PENALTY
             t[3] = target
             t[7] = True
             self.episode_transitions[i] = tuple(t)
@@ -357,7 +340,7 @@ def main():
     rl_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
     rl_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     rl_parser.add_argument("--device", default="cpu", help="推理设备")
-    rl_parser.add_argument("--epsilon", type=float, default=0.25, help="探索率")
+    rl_parser.add_argument("--epsilon", type=float, default=0.1, help="探索率")
     rl_parser.add_argument("--learner_host", default="127.0.0.1", help="Learner IP")
     rl_parser.add_argument("--learner_port", type=int, default=10002, help="Learner PUB 端口（用于接收权重）")
 
