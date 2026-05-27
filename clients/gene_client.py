@@ -24,7 +24,9 @@ from colorama import Back, Style
 
 sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
-from state import State
+from coach.TOP.candidate_filter import compute_candidate_list
+from coach.TOP.action import Action as TOPAction
+from coach.TOP.state import State
 from util import *
 from model import ActionValueNet
 from coach.EggPan.action import Action
@@ -58,7 +60,7 @@ class BaseClient(WebSocketClient):
 # ===================== Demo 模式 =====================
 def run_demo(args):
     CLIENT_ARGS = {
-        'url': f'ws://127.0.0.1:23456/game/client{args.pos}',
+        'url': f'ws://{args.host}:{args.port}/game/client{args.pos}',
         'render': args.render
     }
     try:
@@ -90,9 +92,11 @@ class ImitationClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg.get("stage") == "beginning":
             self.action.history_action = [['PASS', 'PASS', 'PASS']]
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg.get("stage") in ("episodeOver", "gameOver"):
@@ -104,8 +108,20 @@ class ImitationClient(BaseClient):
             self.action.use_expert_prob = max(self.args.min_expert_prob,
                                               self.action.use_expert_prob * self.args.expert_decay)
 
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_idx = self.action.parse(msg, self.render)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
 
@@ -150,6 +166,12 @@ class ImitationAction:
         return ret
 
     def add_to_dataset(self, msg, expert_idx):
+        # PASS 过滤：可选少则跳过；多选时专家选PASS仅10%概率加入
+        if msg["indexRange"] <= 1:
+            return
+        if msg["actionList"][expert_idx][0] == 'PASS' and random.random() > 0.1:
+            return
+
         state = StateCatEmbedding(msg).cpu()
         action_embs = [encode_card(process_card_list(msg["actionList"][i])).flatten().cpu()
                        for i in range(len(msg["actionList"]))]
@@ -266,9 +288,11 @@ class ReinforcementClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
             self.action.reset_episode()
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
@@ -278,23 +302,21 @@ class ReinforcementClient(BaseClient):
             # 训练
             if len(self.action.replay_memory) >= self.args.batch_size:
                 all_losses = []
-                last_batch_reward = 0.0  # 用于展示最后一个 batch 的平均奖励
+                last_batch_reward = 0.0
                 for _ in range(self.args.update_steps):
                     batch = self.action.replay_memory.sample(self.args.batch_size)
                     losses = self.action.replay_memory.learn_batch(
                         batch,
                         self.action.ValueNet,
-                        self.action.target_net,
+                        None,  # [纯MC] target_net 已废弃
                         self.action.optimizer,
                         self.args.gamma,
                         self.args.device
                     )
                     all_losses.extend(losses)
-                    # 记录最后一个 batch 的平均奖励，方便日志展示
                     batch_rewards = [t[3] for t in batch]
                     last_batch_reward = sum(batch_rewards) / len(batch_rewards)
 
-                # 日志现在只在该写的时候写一次
                 if self.episode % self.args.log_interval == 0:
                     avg_loss = sum(all_losses) / len(all_losses) if all_losses else 0.0
                     self.write_log(
@@ -302,7 +324,6 @@ class ReinforcementClient(BaseClient):
                         f"reward_sample={last_batch_reward:.1f}"
                     )
 
-            # 衰减探索率
             self.action.decay_epsilon()
 
             if self.episode % self.args.save_interval == 0:
@@ -318,11 +339,24 @@ class ReinforcementClient(BaseClient):
                 }, save_path)
                 print(Back.GREEN + f"强化学习模型已保存: {save_path}" + Style.RESET_ALL)
 
-            if self.episode % self.args.target_update_freq == 0:
-                self.action.sync_target_network()
+            # [纯MC] target_net 同步已废弃
+            # if self.episode % self.args.target_update_freq == 0:
+            #     self.action.sync_target_network()
+
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
 
         if "actionList" in msg:
-            act_idx = self.action.parse(msg, self.render)
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
+            act_idx = self.action.parse(msg, self.render, state=self.state)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
 
@@ -333,6 +367,9 @@ class ReinforcementAction:
         self.act_range = -1
         self.history_action = [['PASS', 'PASS', 'PASS']]
         self.replay_memory = MemoryBuffer(capacity=args.replay_capacity)
+
+        # TOP 专家（辅助决策）
+        self.top_expert = TOPAction(render=False)
 
         # 本局暂存
         self.episode_transitions = []
@@ -351,10 +388,10 @@ class ReinforcementAction:
         if "model_state_dict" in state_dict:
             self.ValueNet.load_state_dict(state_dict["model_state_dict"])
 
-        # 目标网络（保留但在 MC 模式下不使用）
-        self.target_net = model_class().to(args.device)
-        self.target_net.load_state_dict(self.ValueNet.state_dict())
-        self.target_net.eval()
+        # [纯MC] target_net 已废弃 — 纯 MC 不需要目标网络
+        # self.target_net = model_class().to(args.device)
+        # self.target_net.load_state_dict(self.ValueNet.state_dict())
+        # self.target_net.eval()
 
         self.optimizer = torch.optim.Adam(self.ValueNet.parameters(), lr=args.lr)
         self.step_count = 0
@@ -374,62 +411,88 @@ class ReinforcementAction:
     PASS_PENALTY = 0.05
 
     def apply_final_reward(self, final_reward):
+        """纯 MC：整局所有步的目标统一为终局奖励。"""
         if not self.episode_transitions:
             return
-        for i, trans in enumerate(self.episode_transitions):
-            t = list(trans)
-            t[3] = final_reward - (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
-            if i == len(self.episode_transitions) - 1:
-                t[7] = True
+        for i in range(len(self.episode_transitions)):
+            t = list(self.episode_transitions[i])
+            target = final_reward
+            if t[2][0] == 'PASS':
+                target -= self.PASS_PENALTY
+            t[3] = target
+            t[7] = True
             self.replay_memory.append(tuple(t))
 
-    def sync_target_network(self):
-        self.target_net.load_state_dict(self.ValueNet.state_dict())
+    # [纯MC] sync_target_network 已废弃 — 纯 MC 不需要目标网络
+    # def sync_target_network(self):
+    #     self.target_net.load_state_dict(self.ValueNet.state_dict())
 
     def decay_epsilon(self):
         """每局结束后衰减 epsilon"""
         self.args.epsilon = max(0.1, self.args.epsilon * self.args.epsilon_decay)
 
-    def parse(self, msg, render=True):
+    def parse(self, msg, render=True, state=None):
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
 
-        # 找到 PASS 的索引（PASS 动作列表第一个元素是 'PASS'）
         pass_idx = None
         for i, act in enumerate(self.action):
             if act[0] == 'PASS':
                 pass_idx = i
                 break
 
-        # -------- 原有的 ε-贪婪 + Q 值计算 --------
+        # 1. TOP 专家意见
+        try:
+            top_idx = self.top_expert.parse_AI(msg, msg.get('myPos', 0), state)
+            top_idx = min(top_idx, self.act_range)
+        except Exception:
+            top_idx = -1
+
+        # 2. V14.0 候选过滤（TOP VIP 通道 + 全局 state）
+        try:
+            candidates = compute_candidate_list(
+                msg, self.action, msg['myPos'], state=state, top_idx=top_idx
+            )
+        except Exception:
+            candidates = list(range(self.act_range + 1))
+
+        # 3. Batch 并行计算候选 Q 值
         state = StateCatEmbedding(msg)
         history = self.MapHistoryToLSTM().float().to(self.args.device)
+        q_vals = [float('-inf')] * (self.act_range + 1)
+        if candidates:
+            state_flat = state.flatten().to(self.args.device)
+            act_embs = torch.stack([ActionEmbedding(msg, i).to(self.args.device) for i in candidates])
+            inp_batch = torch.cat((
+                state_flat.unsqueeze(0).expand(len(candidates), -1),
+                act_embs
+            ), dim=1)
+            hist_batch = history.expand(len(candidates), -1, -1)
+            with torch.no_grad():
+                q_batch = self.ValueNet(inp_batch, hist_batch).sum(dim=1)
+            for idx, i in enumerate(candidates):
+                q_vals[i] = q_batch[idx].item()
 
-        # 无论是贪婪还是探索，我们都把 Q 值算出来，方便后续干预
-        q_vals = []
-        with torch.no_grad():
-            for i in range(self.act_range + 1):
-                act_emb = ActionEmbedding(msg, i).to(self.args.device)
-                inp = torch.cat((state.flatten().to(self.args.device), act_emb)).unsqueeze(0)
-                q = self.ValueNet(inp, history).sum().item()
-                q_vals.append(q)
-
+        # 4. 决策
         if random.random() > self.args.epsilon:
-            action_idx = int(np.argmax(q_vals))
+            best_score = -float('inf')
+            action_idx = candidates[0]
+            for i in candidates:
+                if i == pass_idx and len(candidates) > 1:
+                    continue
+                score = q_vals[i] + (0.3 if i == top_idx else 0.0)
+                if score > best_score:
+                    best_score = score
+                    action_idx = i
+            if best_score == -float('inf'):
+                action_idx = int(np.argmax([q_vals[i] if q_vals[i] != float('-inf') else -float('inf') for i in range(self.act_range + 1)]))
         else:
-            action_idx = random.randint(0, self.act_range)
+            non_pass = [i for i in candidates if i != pass_idx]
+            action_idx = random.choice(non_pass) if non_pass else 0
 
-        # ---------- 强制干预：如果选了 PASS 且还有其它合法动作 ----------
-        if action_idx == pass_idx and self.act_range > 0:   # act_range>0 表示不是只有 PASS
-            if random.random() < 0.8:                        # 80% 概率换成出牌
-                # 所有非 PASS 动作的索引
-                non_pass_indices = [i for i in range(self.act_range + 1) if i != pass_idx]
-                # 从中选出 Q 值最大的动作（第二大）
-                action_idx = max(non_pass_indices, key=lambda i: q_vals[i])
-
-        # ---------- 后续原有逻辑不变 ----------
         act = process_card_list(self.action[action_idx])
 
+        # 记录经验（reward 由 apply_final_reward 复盘后填入）
         if self.last_obs is not None and self.last_history is not None:
             transition = (
                 self.last_obs.cpu(),
@@ -437,7 +500,7 @@ class ReinforcementAction:
                 self.last_act,
                 0.0,
                 state.cpu(),
-                self.action,             # A' = 当前步动作列表（不是上一轮的）
+                self.action,
                 history.cpu(),
                 False
             )
@@ -473,8 +536,11 @@ class TestClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
+            self.action.history_action = [['PASS', 'PASS', 'PASS']]
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
@@ -482,16 +548,31 @@ class TestClient(BaseClient):
             self.rewards.append(reward)
             if reward > 0:
                 self.wins += 1
+
+        elif msg["stage"] == "gameResult":
             print(f"累计奖励: {self.rewards}, 胜率: {self.wins/len(self.rewards):.2%}")
 
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
-            act_idx = self.action.parse(msg, self.render)
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
+            act_idx = self.action.parse(msg, self.render, state=self.state)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
 
 class TestAction:
     def __init__(self, args):
         self.args = args
+        self.no_coach = getattr(args, 'no_coach', False)
         self.action = []
         self.act_range = -1
         self.history_action = [['PASS', 'PASS', 'PASS']]
@@ -501,24 +582,52 @@ class TestAction:
         self.ValueNet = model_class().to(args.device)
         self.ValueNet.load_state_dict(state_dict["model_state_dict"])
         self.ValueNet.eval()
-        print(Back.GREEN, f"成功载入测试模型: {args.model}", Style.RESET_ALL)
+        coach_status = "纯模型（无教练）" if self.no_coach else "含 TOP 候选过滤"
+        print(Back.GREEN, f"成功载入测试模型: {args.model} | {coach_status}", Style.RESET_ALL)
 
     def MapHistoryToLSTM(self):
         ret = torch.stack([encode_card(a).flatten() for a in self.history_action], dim=0).unsqueeze(0)
         return ret
 
-    def parse(self, msg, render=True):
+    def parse(self, msg, render=True, state=None):
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
+
+        if self.no_coach:
+            action_indices = list(range(self.act_range + 1))
+        else:
+            try:
+                action_indices = compute_candidate_list(
+                    msg, self.action, msg['myPos'], state=state, top_idx=-1)
+            except Exception:
+                action_indices = list(range(self.act_range + 1))
+
+        # Batch 并行计算 Q 值
         state = StateCatEmbedding(msg)
         history = self.MapHistoryToLSTM().float().to(self.args.device)
-        q_vals = []
-        for i in range(self.act_range + 1):
-            act_emb = ActionEmbedding(msg, i)
-            inp = torch.cat((state.flatten(), act_emb.flatten()), dim=0).unsqueeze(0).to(self.args.device)
-            q = self.ValueNet(inp, history).sum().item()
-            q_vals.append(q)
-        index = np.argmax(q_vals).item()
+        q_vals = [float('-inf')] * (self.act_range + 1)
+        if action_indices:
+            state_flat = state.flatten().to(self.args.device)
+            act_embs = torch.stack([ActionEmbedding(msg, i).to(self.args.device) for i in action_indices])
+            inp_batch = torch.cat((
+                state_flat.unsqueeze(0).expand(len(action_indices), -1),
+                act_embs
+            ), dim=1)
+            hist_batch = history.expand(len(action_indices), -1, -1)
+            with torch.no_grad():
+                q_batch = self.ValueNet(inp_batch, hist_batch).sum(dim=1)
+            for idx, i in enumerate(action_indices):
+                q_vals[i] = q_batch[idx].item()
+
+        best_score = -float('inf')
+        index = action_indices[0]
+        for i in action_indices:
+            if q_vals[i] > best_score:
+                best_score = q_vals[i]
+                index = i
+        if best_score == -float('inf'):
+            index = int(np.argmax([q_vals[i] if q_vals[i] != float('-inf') else -float('inf') for i in range(self.act_range + 1)]))
+
         self.history_action.append(process_card_list(msg["actionList"][index]))
         return index
 
@@ -533,11 +642,15 @@ def main():
     demo_parser.add_argument("pos", type=int, help="座位号")
     demo_parser.add_argument("-c", "--client", default="Demo", help="教练名称")
     demo_parser.add_argument("-r", "--render", default=False, action="store_true")
+    demo_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
+    demo_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
 
     # ---------- imitation ----------
     im_parser = subparsers.add_parser("imitation", help="模仿学习 (DAgger)")
     im_parser.add_argument("pos", type=int, help="座位号")
     im_parser.add_argument("-r", "--render", default=False, action="store_true")
+    im_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
+    im_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     im_parser.add_argument("--model", default=None, help="预训练模型路径")
     im_parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
     im_parser.add_argument("--device", default="cpu")
@@ -554,6 +667,8 @@ def main():
     rl_parser = subparsers.add_parser("reinforcement", help="强化学习 (DQN / DouZero-MC)")
     rl_parser.add_argument("pos", type=int, help="座位号")
     rl_parser.add_argument("-r", "--render", default=False, action="store_true")
+    rl_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
+    rl_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     rl_parser.add_argument("--model", default=None)
     rl_parser.add_argument("--lr", type=float, default=1e-5, help="学习率（MC建议更低）")
     rl_parser.add_argument("--device", default="cpu")
@@ -571,9 +686,13 @@ def main():
     test_parser = subparsers.add_parser("test", help="测试已训练模型")
     test_parser.add_argument("pos", type=int, help="座位号")
     test_parser.add_argument("-r", "--render", default=False, action="store_true")
+    test_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
+    test_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     test_parser.add_argument("--model", required=True)
     test_parser.add_argument("--device", default="cpu")
     test_parser.add_argument("--epsilon", type=float, default=0.1)
+    test_parser.add_argument("--no_coach", action="store_true", default=False,
+                           help="禁用 TOP 候选过滤")
 
     args = parser.parse_args()
 
@@ -607,7 +726,7 @@ def main():
     else:
         check_path_dir = None
 
-    url = f"ws://127.0.0.1:23456/game/client{args.pos}"
+    url = f"ws://{args.host}:{args.port}/game/client{args.pos}"
 
     if args.mode == "rule":
         run_demo(args)

@@ -147,7 +147,6 @@ class Action(object):
                 if curVal <= 10:
                     return index
                 else:
-                    print(index)
                     if card_val[actionList[index][1]] == curVal+1:
                         return index
             else:
@@ -1108,8 +1107,6 @@ class Action(object):
 
         sorted_cards,single_actionlist, pair_actionlist, trips_actionlist, threepair_actionlist,threetwo_actionlist, twotrips_actionlist, straight_actionlist = self.getlist(
             handcards, rank)
-        print(len(single_actionlist), len(pair_actionlist), len(trips_actionlist), len(threetwo_actionlist), len(threepair_actionlist), len(twotrips_actionlist), len(straight_actionlist))
-
         max_val = card_value_s2v[restcards[-1][0][-1]]
 
         for i in actionList:
@@ -1120,13 +1117,16 @@ class Action(object):
         def mysort2(elem):
             return elem[1]
 
+        # FIXED: .sort() 返回 None，导致条件恒成立，O(n²) 循环卡死
+        #     改为 sorted() 返回新列表进行比较
         if len(handcards) <= 12:
+            handcards_sorted = sorted(handcards, key=mysort2)
             for i in range(len(actionList)):
-                for j in range(i+1,len(actionList)):
+                for j in range(i+1, len(actionList)):
                     if len(actionList[i][-1]) + len(actionList[j][-1]) == len(handcards):
                         combine_list = actionList[i][-1] + actionList[j][-1]
-                        if combine_list.sort(key=mysort2) == handcards.sort(key=mysort2):
-                            twohand_candidatelist.append((i,j))
+                        if sorted(combine_list, key=mysort2) == handcards_sorted:
+                            twohand_candidatelist.append((i, j))
 
         if len(single_actionlist) and card_value_s2v[single_actionlist[0][0]] < cur[0] :
             if numofnext == 1:
@@ -1450,7 +1450,5 @@ class Action(object):
                     [8] * 13 + [2, 2],
                     0, 0, None
                 )
-        except Exception as e:
-            if self.render:
-                print(f"规则解析异常: {e}")
+        except Exception:
             return randint(0, self.act_range)

@@ -51,6 +51,25 @@ def process_card_list(card):
         return card[-1]
 
 
+def _extract_cards_from_action(action):
+    """从动作中提取卡牌列表，兼容模拟器 dict 和真实服务器 list 两种格式"""
+    if action is None or action == -1:
+        return []
+    if isinstance(action, dict):
+        return action.get("actions", [])
+    if isinstance(action, list) and len(action) >= 3:
+        # 真实服务器格式: ['Bomb', 'A', ['HA', 'HA', 'CA', 'DA']]
+        return action[2]
+    return []
+
+
+def _extract_pos(value):
+    """从 greaterAction/greaterPos 中提取玩家位置（若为整数）"""
+    if isinstance(value, int) and 0 <= value <= 3:
+        return value
+    return None
+
+
 def encode_message(message):
     handcards_tensor = encode_card(message["handCards"])
     playArea_tensor = [encode_card(process_card_list(card["playArea"])) for card in message["publicInfo"]]
@@ -60,24 +79,77 @@ def encode_message(message):
     except:
         print(Back.RED, rest_tensor, Style.RESET_ALL)
     rank_tensor = F.one_hot(torch.tensor([rank2index[message["curRank"]]]), num_classes=13)
+
+    # ---- 新增编码 ----
+
+    # 自己的位置
+    myPos = message.get("myPos", 0)
+    myPos_onehot = F.one_hot(torch.tensor(myPos), num_classes=4)
+
+    # 队友位置
+    teammatePos = (myPos + 2) % 4
+    teammatePos_onehot = F.one_hot(torch.tensor(teammatePos), num_classes=4)
+
+    # 队友出牌区
+    teammate_playArea = playArea_tensor[teammatePos]
+
+    # 当前最大牌 & 当前领先者
+    # 真实服务器: act消息 greaterAction=位置(int), greaterPos=动作(list)
+    #             notify消息 greaterPos=位置(int), greaterAction=动作(list)
+    # 模拟器:     greaterPos=位置(int), greaterAction=动作(dict)
+    # 通过类型判断哪个是位置、哪个是动作，兼容所有情况
+    ga = message.get("greaterAction", None)
+    gp = message.get("greaterPos", None)
+
+    greater_cards = _extract_cards_from_action(ga) or _extract_cards_from_action(gp)
+    greater_pos = _extract_pos(gp) if _extract_pos(gp) is not None else _extract_pos(ga)
+
+    greater_tensor = encode_card(greater_cards) if greater_cards else torch.zeros(4, 15, dtype=torch.long)
+    greaterPos_onehot = F.one_hot(torch.tensor(greater_pos), num_classes=4) if greater_pos is not None else torch.zeros(4, dtype=torch.long)
+
+    # 已出牌统计: 优先使用客户端维护的累计统计，否则回退到 playArea 汇总
+    played_cards = message.get("playedCards", None)
+    if played_cards is not None:
+        if isinstance(played_cards, torch.Tensor):
+            round_played = played_cards
+        else:
+            round_played = torch.tensor(played_cards, dtype=torch.long)
+    else:
+        round_played = torch.zeros(4, 15, dtype=torch.long)
+        for pa in playArea_tensor:
+            round_played = round_played + pa
+
     return dict(
         handcards=handcards_tensor,
         playArea=playArea_tensor,
         rest_num=rest_tensor,
-        rank_num=rank_tensor
+        rank_num=rank_tensor,
+        myPos=myPos_onehot,
+        teammatePos=teammatePos_onehot,
+        teammate_playArea=teammate_playArea,
+        greater_action=greater_tensor,
+        greaterPos=greaterPos_onehot,
+        round_played=round_played,
     )
 
 
 def StateCatEmbedding(message):
     encode_info = encode_message(message)
     state_tensor = torch.cat((
-        torch.flatten(encode_info["handcards"]),
-        torch.flatten(encode_info["playArea"][0]),
-        torch.flatten(encode_info["playArea"][1]),
-        torch.flatten(encode_info["playArea"][2]),
-        torch.flatten(encode_info["playArea"][3]),
-        torch.flatten(encode_info["rest_num"]),
-        torch.flatten(encode_info["rank_num"])
+        torch.flatten(encode_info["handcards"]),         # 60
+        torch.flatten(encode_info["playArea"][0]),        # 60
+        torch.flatten(encode_info["playArea"][1]),        # 60
+        torch.flatten(encode_info["playArea"][2]),        # 60
+        torch.flatten(encode_info["playArea"][3]),        # 60
+        torch.flatten(encode_info["rest_num"]),           # 120
+        torch.flatten(encode_info["rank_num"]),           # 13
+        # ---- 新增 ----
+        torch.flatten(encode_info["myPos"]),              # 4
+        torch.flatten(encode_info["teammatePos"]),        # 4
+        torch.flatten(encode_info["teammate_playArea"]),  # 60
+        torch.flatten(encode_info["greater_action"]),     # 60
+        torch.flatten(encode_info["greaterPos"]),         # 4
+        torch.flatten(encode_info["round_played"]),       # 60
     ), dim=0)
     return state_tensor
 

@@ -23,23 +23,22 @@ class CrossUnit(nn.Module):
 class ActionValueNet(nn.Module):
     def __init__(self):
         super().__init__()
-        # LSTM 处理历史出牌序列（加大隐层）
+        # LSTM 处理历史出牌序列
         self.lstm = nn.LSTM(60, 512, batch_first=True)
-        # 6层 CrossUnit，加大维度
+        # 4层 CrossUnit，逐级收窄
         self.total_cross = nn.Sequential(
-            CrossUnit(493 + 512, 1024, 1024),
-            CrossUnit(1024, 1024, 1024),
-            CrossUnit(1024, 1024, 1024),
-            CrossUnit(1024, 1024, 1024),
+            CrossUnit(685 + 512, 1024, 1024),
             CrossUnit(1024, 1024, 512),
+            CrossUnit(512, 512, 512),
+            CrossUnit(512, 512, 256),
         )
-        self.value_head = nn.Linear(512, 1)  # 无激活函数，Q 值可正可负
+        self.value_head = nn.Linear(256, 1)  # 无激活函数，Q 值可正可负
 
     def forward(self, state, history):
-        # state: [B, 492]
+        # state: [B, 685]  (625 维状态 + 60 维动作编码)
         # history: [B, T, 60]
         out, (h_n, _) = self.lstm(history)
         # 取最后一个时间步的LSTM输出
-        state = torch.cat((out[:, -1, :], state), dim=1)   # [B, 512+492]
-        value = self.value_head(self.total_cross(state))   # [B, 1]
+        x = torch.cat((out[:, -1, :], state), dim=1)   # [B, 512+685]
+        value = self.value_head(self.total_cross(x))   # [B, 1]
         return value

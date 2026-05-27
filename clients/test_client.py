@@ -84,10 +84,12 @@ class ExampleClient(WebSocketClient):
         return reward
 
     def received_message(self, message):
-        message = json.loads(str(message))                                    
-        self.state.parse(message)         
+        message = json.loads(str(message))
+        self.state.parse(message)
+        message.setdefault("myPos", self.state._myPos)
 
         if message["stage"] == "beginning":
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif message["stage"] == "episodeOver":
@@ -100,8 +102,20 @@ class ExampleClient(WebSocketClient):
             debugout(self.rewards, "blue")
             debugout("胜率:{}".format(self.wins / len(self.rewards)), "green")
 
-        if "actionList" in message:                                           
+        if message.get("type") == "notify" and message.get("stage") == "play":
+            cur_action = message.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
+        if "actionList" in message:
+            message["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_index = self.action.parse(message, self.render)
+            if message.get("stage") == "play":
+                chosen_action = message["actionList"][act_index]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_index}))
 
 

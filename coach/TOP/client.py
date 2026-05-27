@@ -27,5 +27,4 @@ class Main(WebSocketClient):
                                                self.state.remain_cards_classbynum, self.state.pass_num,
                                                self.state.my_pass_num, self.state.tribute_result)
 
-            print(act_index)
             self.send(json.dumps({"actIndex": act_index}))

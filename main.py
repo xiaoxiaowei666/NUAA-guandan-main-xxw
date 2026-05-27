@@ -73,6 +73,7 @@ class GameLauncher:
                 "name": "测试模型",
                 "params": {
                     "render": {"label": "渲染画面", "type": bool, "default": True},
+                    "no_coach": {"label": "禁用教练辅助（纯模型）", "type": bool, "default": False},
                     "model": {"label": "模型路径 (必填)", "type": str, "default": ""},
                     "device": {"label": "设备", "type": str, "default": "cuda", "option": ["cpu", "cuda"]},
                     "epsilon": {"label": "Epsilon", "type": float, "default": 0.1}
@@ -460,7 +461,7 @@ class GameLauncher:
         self.log("开始依次启动全部客户端...")
         for i in range(4):
             self.start_single_client(i)
-            time.sleep(0.5)
+            time.sleep(1)
 
     def stop_all(self):
         for idx, proc in list(self.client_processes.items()):

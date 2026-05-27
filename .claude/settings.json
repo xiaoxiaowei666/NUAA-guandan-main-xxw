@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"D:\\\\conda_envs\\\\egg\\\\python.exe\" -c \"from clients.tcli_mcts import MCTSInferenceClient; print\\('tcli_mcts imports OK'\\)\")",
+      "Bash(\"D:\\\\conda_envs\\\\egg\\\\python.exe\" clients/tcli_mcts.py --help)"
+    ]
+  }
+}

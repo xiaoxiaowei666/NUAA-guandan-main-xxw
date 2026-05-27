@@ -24,7 +24,9 @@ from ws4py.client.threadedclient import WebSocketClient
 # 注意导入路径：根据你的项目结构，可能需调整
 sys.path.append(os.path.abspath('.'))
 from coach import LoadCoach
-from state import State
+from coach.TOP.state import State
+from coach.TOP.candidate_filter import compute_candidate_list
+from coach.TOP.action import Action as TOPAction
 from util import *
 from model import ActionValueNet
 
@@ -68,6 +70,9 @@ class InferenceClient(BaseClient):
         self.model = ActionValueNet().to(self.device)
         self.model.eval()
 
+        # TOP 专家（辅助决策）
+        self.top_expert = TOPAction(render=False)
+
         self.history_action = [['PASS', 'PASS', 'PASS']]
         self.episode = 0
 
@@ -93,6 +98,7 @@ class InferenceClient(BaseClient):
         self.ready_socket.connect(f"tcp://{args.learner_host}:5556")
         self.ready_socket.send(b"ready")          # 启动时发送一次
         print("已发送就绪信号至 Learner")
+
 
         # 后台监听权重
         self.weights_lock = threading.Lock()
@@ -127,6 +133,7 @@ class InferenceClient(BaseClient):
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
             self.episode_transitions.clear()
@@ -135,6 +142,7 @@ class InferenceClient(BaseClient):
             self.last_act = None
             self.last_action_list = None
             self.history_action = [['PASS', 'PASS', 'PASS']]
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
@@ -147,8 +155,22 @@ class InferenceClient(BaseClient):
             self.last_history = None
             self.last_act = None
 
+        # 收到 notify/play 时累计已出牌统计（别人出牌）
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
+
         if "actionList" in msg:
+            msg["playedCards"] = self.played_cards
             act_idx = self.select_action(msg)
+            # 自己出牌也计入已出牌统计（进贡/还贡除外）
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
     def select_action(self, msg):
@@ -162,41 +184,74 @@ class InferenceClient(BaseClient):
                 pass_idx = i
                 break
 
+        # 1. TOP 专家意见（先问专家）
+        try:
+            top_idx = self.top_expert.parse_AI(msg, self.state._myPos, self.state)
+            top_idx = min(top_idx, act_range)
+        except Exception:
+            top_idx = -1
+
+        # 2. V7.1 候选过滤（传入 TOP 推荐，享受 VIP 通道）
+        try:
+            candidates = compute_candidate_list(
+                msg, action_list, self.state._myPos, self.state, top_idx=top_idx
+            )
+        except Exception:
+            import traceback
+            with open("filter_error.log", "a", encoding="utf-8") as f:
+                f.write(f"[{time.ctime()}] filter crash\n")
+                traceback.print_exc(file=f)
+            candidates = list(range(act_range + 1))
+
+        # 3. Batch 并行计算候选动作的 Q 值
         state = StateCatEmbedding(msg).to(self.device)
         history = self.MapHistoryToLSTM().float().to(self.device)
-
-        with self.weights_lock:
-            q_vals = []
+        q_vals = [float('-inf')] * (act_range + 1)
+        if candidates:
+            state_flat = state.flatten()
+            act_embs = torch.stack([ActionEmbedding(msg, i).to(self.device) for i in candidates])
+            inp_batch = torch.cat((
+                state_flat.unsqueeze(0).expand(len(candidates), -1),
+                act_embs
+            ), dim=1)
+            hist_batch = history.expand(len(candidates), -1, -1)
             with torch.no_grad():
-                for i in range(act_range + 1):
-                    act_emb = ActionEmbedding(msg, i).to(self.device)
-                    inp = torch.cat((state.flatten(), act_emb)).unsqueeze(0)
-                    q = self.model(inp, history).sum().item()
-                    q_vals.append(q)
+                q_batch = self.model(inp_batch, hist_batch).sum(dim=1)
+            for idx, i in enumerate(candidates):
+                q_vals[i] = q_batch[idx].item()
+
+        # 4. 决策
+        top_bonus = getattr(self.args, 'top_bonus', 0.3)
 
         if random.random() > self.args.epsilon:
-            # Greedy: 选最优非 PASS 动作，防止 PASS 崩塌
-            if pass_idx is not None and act_range > 0:
-                q_vals_masked = q_vals.copy()
-                q_vals_masked[pass_idx] = -float('inf')
-                action_idx = int(np.argmax(q_vals_masked))
-            else:
-                action_idx = int(np.argmax(q_vals))
+            # Greedy: 候选内 Q + TOP 加成选最优
+            best_score = -float('inf')
+            action_idx = candidates[0]
+            for i in candidates:
+                if i == pass_idx and len(candidates) > 1:
+                    continue
+                score = q_vals[i] + (top_bonus if i == top_idx else 0.0)
+                if score > best_score:
+                    best_score = score
+                    action_idx = i
+            if best_score == -float('inf'):
+                action_idx = int(np.argmax([q_vals[i] if q_vals[i] != float('-inf') else -float('inf') for i in range(act_range + 1)]))
         else:
-            # Exploration: 允许 PASS，让模型学习何时该让牌
-            action_idx = random.randint(0, act_range)
+            # Explore: 候选集内随机探索
+            non_pass = [i for i in candidates if i != pass_idx]
+            action_idx = random.choice(non_pass) if non_pass else 0
 
         act = process_card_list(action_list[action_idx])
 
-        # 记录经验
+        # 记录经验（reward 由 apply_final_reward 复盘后填入）
         if self.last_obs is not None and self.last_history is not None:
             transition = (
                 self.last_obs.cpu(),
                 self.last_history.cpu(),
                 self.last_act,
-                0.0,
+                0.0,           # 复盘时覆盖
                 state.cpu(),
-                action_list,            # A' = 当前步的动作列表（不是上一轮的）
+                action_list,
                 history.cpu(),
                 False
             )
@@ -213,14 +268,17 @@ class InferenceClient(BaseClient):
     PASS_PENALTY = 0.05  # PASS 动作的微小惩罚
 
     def apply_final_reward(self, final_reward):
+        """纯 MC：整局所有步的目标统一为终局奖励。
+        target = final_reward（加可选的 PASS 微调惩罚）"""
         if not self.episode_transitions:
             return
-        for i, trans in enumerate(self.episode_transitions):
-            t = list(trans)
-            # 基础终局奖励，PASS 动作额外减分
-            t[3] = final_reward - (self.PASS_PENALTY if t[2][0] == 'PASS' else 0.0)
-            if i == len(self.episode_transitions) - 1:
-                t[7] = True
+        for i in range(len(self.episode_transitions)):
+            t = list(self.episode_transitions[i])
+            target = final_reward
+            if t[2][0] == 'PASS':
+                target -= self.PASS_PENALTY
+            t[3] = target
+            t[7] = True
             self.episode_transitions[i] = tuple(t)
 
     def send_experience(self):
@@ -234,6 +292,12 @@ class InferenceClient(BaseClient):
                 obs_np, hist_np, t[2], t[3],
                 next_obs_np, t[5], next_hist_np, t[7]
             ))
+        # 后台线程发送，避免阻塞 WebSocket 回调导致整桌冻结
+        threading.Thread(
+            target=self._send_experience_async, args=(data,), daemon=True
+        ).start()
+
+    def _send_experience_async(self, data):
         try:
             self.push_socket.send(pickle.dumps(data))
             print(f"已发送 {len(data)} 条经验至 Learner")
@@ -276,7 +340,7 @@ def main():
     rl_parser.add_argument("--host", default="127.0.0.1", help="游戏服务器 IP")
     rl_parser.add_argument("--port", type=int, default=23456, help="游戏服务器端口")
     rl_parser.add_argument("--device", default="cpu", help="推理设备")
-    rl_parser.add_argument("--epsilon", type=float, default=0.2, help="探索率")
+    rl_parser.add_argument("--epsilon", type=float, default=0.1, help="探索率")
     rl_parser.add_argument("--learner_host", default="127.0.0.1", help="Learner IP")
     rl_parser.add_argument("--learner_port", type=int, default=10002, help="Learner PUB 端口（用于接收权重）")
 

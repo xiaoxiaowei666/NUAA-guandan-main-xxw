@@ -27,8 +27,8 @@ def start(port, mode, seat, extra_args=[]):
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         creationflags=creationflags,
         cwd=PROJECT_ROOT,
         encoding="utf-8",

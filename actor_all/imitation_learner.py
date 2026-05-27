@@ -43,6 +43,9 @@ class ImitationLearnerGUI:
         self.log_interval = tk.IntVar(value=10)
         self.pub_port = tk.IntVar(value=10003)
         self.expected_clients = tk.IntVar(value=4)
+        self.expert_init = tk.DoubleVar(value=1.0)
+        self.expert_decay = tk.DoubleVar(value=0.995)
+        self.min_expert_prob = tk.DoubleVar(value=0.1)
 
         # 后端变量
         self.context = None
@@ -57,6 +60,7 @@ class ImitationLearnerGUI:
         self.dataset = deque(maxlen=self.dataset_capacity.get())
         self.dataset_lock = threading.Lock()
         self.train_count = 0
+        self.current_expert_prob = 1.0
         self.save_dir = ""
 
         self.ready_count = 0
@@ -113,6 +117,23 @@ class ImitationLearnerGUI:
 
         ttk.Label(param_frame, text="期望客户端数:").grid(row=row, column=2, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.expected_clients, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
+        row += 1
+
+        ttk.Separator(param_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=4, sticky=tk.EW, pady=3)
+        row += 1
+
+        ttk.Label(param_frame, text="专家概率参数", font=("", 9, "bold")).grid(row=row, column=0, columnspan=4, sticky=tk.W)
+        row += 1
+
+        ttk.Label(param_frame, text="初始专家概率:").grid(row=row, column=0, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.expert_init, width=10).grid(row=row, column=1, padx=5, sticky=tk.W)
+
+        ttk.Label(param_frame, text="衰减因子:").grid(row=row, column=2, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.expert_decay, width=10).grid(row=row, column=3, padx=5, sticky=tk.W)
+        row += 1
+
+        ttk.Label(param_frame, text="最低专家概率:").grid(row=row, column=0, sticky=tk.W)
+        ttk.Entry(param_frame, textvariable=self.min_expert_prob, width=10).grid(row=row, column=1, padx=5, sticky=tk.W)
 
         # 控制按钮
         btn_frame = ttk.Frame(self.master)
@@ -210,8 +231,16 @@ class ImitationLearnerGUI:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.dataset = deque(maxlen=dataset_cap)
         self.train_count = 0
+        self.current_expert_prob = self.expert_init.get()
+        self.expert_decay_val = self.expert_decay.get()
+        self.min_expert_prob_val = self.min_expert_prob.get()
         self.save_dir = f"model/imitation_checkpoints_{now_str()}"
         os.makedirs(self.save_dir, exist_ok=True)
+
+        self.value_log = open(os.path.join(self.save_dir, "value.log"), "w", encoding="utf-8")
+        self.value_log.write("step\tloss\taccuracy\texpert_prob\tdataset_size\ttimestamp\n")
+        self.value_log.flush()
+        self.log(f"📊 value.log → {os.path.join(self.save_dir, 'value.log')}")
 
         # ZMQ 初始化
         self.context = zmq.Context()
@@ -268,6 +297,8 @@ class ImitationLearnerGUI:
             self.context.term()
         for var in self.status_vars:
             var.set(var.get().split(":")[0] + ": 已停止")
+        if hasattr(self, 'value_log') and self.value_log:
+            self.value_log.close()
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.log("🛑 Imitation Learner 已停止")
@@ -299,7 +330,7 @@ class ImitationLearnerGUI:
         if not self.pub_socket:
             return
         state_dict = {k: v.cpu() for k, v in self.model.state_dict().items()}
-        msg = pickle.dumps(state_dict)
+        msg = pickle.dumps((state_dict, self.current_expert_prob))
         try:
             self.pub_socket.send(msg)
         except Exception as e:
@@ -344,8 +375,15 @@ class ImitationLearnerGUI:
                             batch = random.sample(self.dataset, self.batch_size_val)
                         loss, acc = self._imitation_train_step(batch)
                         self.train_count += 1
+                        self.current_expert_prob = max(
+                            self.min_expert_prob_val,
+                            self.current_expert_prob * self.expert_decay_val
+                        )
                         if self.train_count % self.log_interval_val == 0:
-                            self.log(f"🔄 训练 #{self.train_count} | Loss: {loss:.4f} | Acc: {acc:.2%} | 数据集: {dataset_len}")
+                            self.log(f"🔄 训练 #{self.train_count} | Loss: {loss:.4f} | Acc: {acc:.2%} | 专家概率: {self.current_expert_prob:.3f} | 数据集: {dataset_len}")
+                            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                            self.value_log.write(f"{self.train_count}\t{loss:.6f}\t{acc:.6f}\t{self.current_expert_prob:.4f}\t{dataset_len}\t{ts}\n")
+                            self.value_log.flush()
                         if self.train_count % self.save_interval_val == 0:
                             save_path = os.path.join(self.save_dir, f"imitation_train{self.train_count}.pth")
                             torch.save({

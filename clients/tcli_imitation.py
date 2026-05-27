@@ -28,9 +28,18 @@ from ws4py.client.threadedclient import WebSocketClient
 from colorama import Back, Style
 
 sys.path.append(os.path.abspath('.'))
-from state import State
+from state import State as DefaultState
 from util import *
 from model import ActionValueNet
+
+
+def _load_coach_state(expert_name):
+    """尝试加载教练专用的 State 类，失败则返回默认 State。"""
+    try:
+        mod = importlib.import_module(f"coach.{expert_name}.state")
+        return getattr(mod, "State", DefaultState)
+    except Exception:
+        return DefaultState
 
 
 class ImitationAction:
@@ -54,8 +63,8 @@ class ImitationAction:
         # 加载专家策略（只取 Action 类，不需要 WebSocket 连接）
         self.expert = self._load_expert(args.expert)
 
-        # DAgger 概率
-        self.use_expert_prob = args.expert_init
+        # DAgger 概率（由 Learner 广播下发）
+        self.use_expert_prob = 1.0
 
         # 当前局的样本缓冲
         self.buffer = []
@@ -85,6 +94,12 @@ class ImitationAction:
 
     def add_to_buffer(self, msg, expert_idx):
         """将当前状态、历史、动作嵌入及专家索引加入缓冲（转为numpy以备发送）"""
+        # PASS 过滤：可选少则跳过；多选时专家选PASS仅10%概率加入
+        if msg["indexRange"] <= 1:
+            return
+        if msg["actionList"][expert_idx][0] == 'PASS' and random.random() > 0.3:
+            return
+
         state_tensor = StateCatEmbedding(msg).cpu()
         history_tensor = self.MapHistoryToLSTM().cpu().float()
         action_embs = [
@@ -139,23 +154,18 @@ class ImitationAction:
         self.count += 1
         return index
 
-    def decay_expert_prob(self):
-        self.use_expert_prob = max(
-            self.args.min_expert_prob,
-            self.use_expert_prob * self.args.expert_decay
-        )
-
     def reset_episode(self):
         self.buffer.clear()
         self.history_action = [['PASS', 'PASS', 'PASS']]
 
-    def load_weights(self, state_dict):
-        """从 Learner 接收新权重并加载到模型"""
+    def load_weights(self, state_dict, expert_prob=None):
+        """从 Learner 接收新权重和专家概率"""
         with torch.no_grad():
-            # 将权重转移到当前设备
             for k, v in state_dict.items():
                 state_dict[k] = v.to(self.device)
             self.model.load_state_dict(state_dict)
+        if expert_prob is not None:
+            self.use_expert_prob = expert_prob
 
 
 class ImitationDistClient(WebSocketClient):
@@ -163,7 +173,8 @@ class ImitationDistClient(WebSocketClient):
     def __init__(self, url, args):
         super().__init__(url)
         self.args = args
-        self.state = State(args.render)
+        CoachState = _load_coach_state(args.expert)
+        self.state = CoachState(args.render)
         self.render = args.render
         self.episode = 0
 
@@ -201,27 +212,40 @@ class ImitationDistClient(WebSocketClient):
             try:
                 if self.sub_socket.poll(timeout=500):
                     msg = self.sub_socket.recv()
-                    state_dict = pickle.loads(msg)
-                    self.action.load_weights(state_dict)
+                    state_dict, expert_prob = pickle.loads(msg)
+                    self.action.load_weights(state_dict, expert_prob)
             except Exception as e:
                 print(f"权重监听异常: {e}")
 
     def received_message(self, message):
         msg = json.loads(str(message))
         self.state.parse(msg)
+        msg.setdefault("myPos", self.state._myPos)
 
         if msg["stage"] == "beginning":
             self.action.reset_episode()
+            self.played_cards = torch.zeros(4, 15, dtype=torch.long)
             self.episode += 1
 
         elif msg["stage"] == "episodeOver":
             if self.action.buffer:
                 self.send_expert_samples()
             self.action.reset_episode()
-            self.action.decay_expert_prob()
+
+        if msg.get("type") == "notify" and msg.get("stage") == "play":
+            cur_action = msg.get("curAction")
+            if cur_action:
+                cards = process_card_list(cur_action)
+                self.played_cards = self.played_cards + encode_card(cards)
 
         if "actionList" in msg:
+            msg["playedCards"] = getattr(self, "played_cards", torch.zeros(4, 15, dtype=torch.long))
             act_idx = self.action.parse(msg, self.render, self.state)
+            if msg.get("stage") == "play":
+                chosen_action = msg["actionList"][act_idx]
+                cards = process_card_list(chosen_action)
+                if cards != ('PASS', 'PASS', 'PASS'):
+                    self.played_cards = self.played_cards + encode_card(cards)
             self.send(json.dumps({"actIndex": act_idx}))
 
     def send_expert_samples(self):
@@ -254,9 +278,6 @@ def main():
     im_parser.add_argument("--device", default="cpu")
     im_parser.add_argument("--learner_host", default="127.0.0.1")
     im_parser.add_argument("--learner_port", type=int, default=10003)
-    im_parser.add_argument("--expert_init", type=float, default=0.1, help="初始专家概率")
-    im_parser.add_argument("--expert_decay", type=float, default=0.995, help="专家概率衰减因子")
-    im_parser.add_argument("--min_expert_prob", type=float, default=0.1, help="最低专家概率")
     im_parser.add_argument("--expert", default="TOP", help="专家教练名称（对应 coach/<Name>/action.py)")
 
     args = parser.parse_args()
