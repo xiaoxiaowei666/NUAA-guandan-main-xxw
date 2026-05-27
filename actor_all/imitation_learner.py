@@ -237,6 +237,11 @@ class ImitationLearnerGUI:
         self.save_dir = f"model/imitation_checkpoints_{now_str()}"
         os.makedirs(self.save_dir, exist_ok=True)
 
+        self.value_log = open(os.path.join(self.save_dir, "value.log"), "w", encoding="utf-8")
+        self.value_log.write("step\tloss\taccuracy\texpert_prob\tdataset_size\ttimestamp\n")
+        self.value_log.flush()
+        self.log(f"📊 value.log → {os.path.join(self.save_dir, 'value.log')}")
+
         # ZMQ 初始化
         self.context = zmq.Context()
 
@@ -292,6 +297,8 @@ class ImitationLearnerGUI:
             self.context.term()
         for var in self.status_vars:
             var.set(var.get().split(":")[0] + ": 已停止")
+        if hasattr(self, 'value_log') and self.value_log:
+            self.value_log.close()
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.log("🛑 Imitation Learner 已停止")
@@ -374,6 +381,9 @@ class ImitationLearnerGUI:
                         )
                         if self.train_count % self.log_interval_val == 0:
                             self.log(f"🔄 训练 #{self.train_count} | Loss: {loss:.4f} | Acc: {acc:.2%} | 专家概率: {self.current_expert_prob:.3f} | 数据集: {dataset_len}")
+                            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                            self.value_log.write(f"{self.train_count}\t{loss:.6f}\t{acc:.6f}\t{self.current_expert_prob:.4f}\t{dataset_len}\t{ts}\n")
+                            self.value_log.flush()
                         if self.train_count % self.save_interval_val == 0:
                             save_path = os.path.join(self.save_dir, f"imitation_train{self.train_count}.pth")
                             torch.save({

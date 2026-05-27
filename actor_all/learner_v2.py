@@ -260,6 +260,12 @@ class LearnerV2GUI:
         # V2: 固定保存目录，扫描已有 checkpoint，续接编号 (1,2,3...)
         self.save_dir = "model/selfplay_checkpoints"
         os.makedirs(self.save_dir, exist_ok=True)
+
+        self.value_log = open(os.path.join(self.save_dir, "value.log"), "w", encoding="utf-8")
+        self.value_log.write("step\tloss\tavg_q\tavg_reward\tbuffer_size\tpool_size\ttimestamp\n")
+        self.value_log.flush()
+        self.log(f"📊 value.log → {os.path.abspath(os.path.join(self.save_dir, 'value.log'))}")
+
         import glob as _glob
         existing = _glob.glob(os.path.join(self.save_dir, "*.pth"))
         self.model_pool = sorted(existing, key=lambda f: int(os.path.basename(f).replace(".pth", "")) if os.path.basename(f).replace(".pth", "").isdigit() else 0)
@@ -345,6 +351,8 @@ class LearnerV2GUI:
             self.context.term()
         for var in self.status_vars:
             var.set(var.get().split(":")[0] + ": 已停止")
+        if hasattr(self, 'value_log') and self.value_log:
+            self.value_log.close()
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.log("🛑 Learner V2 已停止")
@@ -441,7 +449,7 @@ class LearnerV2GUI:
         poller.register(self.pull_socket, zmq.POLLIN)
 
         while self.running:
-            socks = dict(poller.poll(timeout=100))
+            socks = dict(poller.poll(timeout=50))
             if self.pull_socket in socks:
                 try:
                     raw = self.pull_socket.recv(flags=zmq.NOBLOCK)
@@ -487,6 +495,9 @@ class LearnerV2GUI:
                                 f"Reward均值: {avg_r:+.2f} | Buffer: {buffer_len} | "
                                 f"模型池: {len(self.model_pool)}"
                             )
+                            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                            self.value_log.write(f"{train_count}\t{loss:.6f}\t{avg_q:.6f}\t{avg_r:.6f}\t{buffer_len}\t{len(self.model_pool)}\t{ts}\n")
+                            self.value_log.flush()
                         if train_count % 5 == 0:
                             self.broadcast_weights()
                         if train_count % self.save_interval_val == 0:
@@ -504,7 +515,7 @@ class LearnerV2GUI:
                     self.log(f"❌ 训练异常: {e}")
             else:
                 idle_count += 1
-                sleep_time = min(0.1 * idle_count, 2.0)
+                sleep_time = min(0.05 * idle_count, 0.5)
                 time.sleep(sleep_time)
 
 

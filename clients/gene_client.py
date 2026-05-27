@@ -572,6 +572,7 @@ class TestClient(BaseClient):
 class TestAction:
     def __init__(self, args):
         self.args = args
+        self.no_coach = getattr(args, 'no_coach', False)
         self.action = []
         self.act_range = -1
         self.history_action = [['PASS', 'PASS', 'PASS']]
@@ -581,7 +582,8 @@ class TestAction:
         self.ValueNet = model_class().to(args.device)
         self.ValueNet.load_state_dict(state_dict["model_state_dict"])
         self.ValueNet.eval()
-        print(Back.GREEN, f"成功载入测试模型: {args.model}", Style.RESET_ALL)
+        coach_status = "纯模型（无教练）" if self.no_coach else "含 TOP 候选过滤"
+        print(Back.GREEN, f"成功载入测试模型: {args.model} | {coach_status}", Style.RESET_ALL)
 
     def MapHistoryToLSTM(self):
         ret = torch.stack([encode_card(a).flatten() for a in self.history_action], dim=0).unsqueeze(0)
@@ -591,34 +593,35 @@ class TestAction:
         self.action = msg["actionList"]
         self.act_range = msg["indexRange"]
 
-        # V14.0 候选过滤（测试模式，无 TOP 专家，但传入全局 state）
-        try:
-            candidates = compute_candidate_list(
-                msg, self.action, msg['myPos'], state=state, top_idx=-1)
-        except Exception:
-            candidates = list(range(self.act_range + 1))
+        if self.no_coach:
+            action_indices = list(range(self.act_range + 1))
+        else:
+            try:
+                action_indices = compute_candidate_list(
+                    msg, self.action, msg['myPos'], state=state, top_idx=-1)
+            except Exception:
+                action_indices = list(range(self.act_range + 1))
 
-        # Batch 并行计算候选 Q 值
+        # Batch 并行计算 Q 值
         state = StateCatEmbedding(msg)
         history = self.MapHistoryToLSTM().float().to(self.args.device)
         q_vals = [float('-inf')] * (self.act_range + 1)
-        if candidates:
+        if action_indices:
             state_flat = state.flatten().to(self.args.device)
-            act_embs = torch.stack([ActionEmbedding(msg, i).to(self.args.device) for i in candidates])
+            act_embs = torch.stack([ActionEmbedding(msg, i).to(self.args.device) for i in action_indices])
             inp_batch = torch.cat((
-                state_flat.unsqueeze(0).expand(len(candidates), -1),
+                state_flat.unsqueeze(0).expand(len(action_indices), -1),
                 act_embs
             ), dim=1)
-            hist_batch = history.expand(len(candidates), -1, -1)
+            hist_batch = history.expand(len(action_indices), -1, -1)
             with torch.no_grad():
                 q_batch = self.ValueNet(inp_batch, hist_batch).sum(dim=1)
-            for idx, i in enumerate(candidates):
+            for idx, i in enumerate(action_indices):
                 q_vals[i] = q_batch[idx].item()
 
-        # 候选内选最优
         best_score = -float('inf')
-        index = candidates[0]
-        for i in candidates:
+        index = action_indices[0]
+        for i in action_indices:
             if q_vals[i] > best_score:
                 best_score = q_vals[i]
                 index = i
@@ -688,6 +691,8 @@ def main():
     test_parser.add_argument("--model", required=True)
     test_parser.add_argument("--device", default="cpu")
     test_parser.add_argument("--epsilon", type=float, default=0.1)
+    test_parser.add_argument("--no_coach", action="store_true", default=False,
+                           help="禁用 TOP 候选过滤")
 
     args = parser.parse_args()
 
